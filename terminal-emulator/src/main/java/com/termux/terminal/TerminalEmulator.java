@@ -390,6 +390,17 @@ public final class TerminalEmulator {
     /** ANSI mode 2, KAM. While it is set the keyboard is locked, see {@link #isKeyboardLocked()}. */
     private boolean mKeyboardLocked;
 
+    private static final int PROTECTED_MODE_OFF = 0;
+    private static final int PROTECTED_MODE_DEC = 1;
+    private static final int PROTECTED_MODE_ISO = 2;
+
+    /**
+     * Which kind of protection the protected attribute of the cells stands for. Like in xterm both kinds use the same
+     * attribute, DECSCA makes it DEC protection and SPA makes it ISO protection, see
+     * {@link #isCellProtectedFromErase(int, int, boolean)}.
+     */
+    private int mProtectedMode = PROTECTED_MODE_OFF;
+
     /** The argument of the last DECSACE, 0 and 1 are a stream of characters and 2 is a rectangle. */
     private int mAttributeChangeExtent;
 
@@ -1146,7 +1157,7 @@ public final class TerminalEmulator {
                                     long style = getStyle();
                                     for (int row = top - 1; row < bottom; row++)
                                         for (int col = left - 1; col < right; col++)
-                                            if (!selective || (TextStyle.decodeEffect(mScreen.getStyleAt(row, col)) & TextStyle.CHARACTER_ATTRIBUTE_PROTECTED) == 0)
+                                            if (!selective || !isCellProtectedFromErase(row, col, true) || mProtectedMode != PROTECTED_MODE_DEC)
                                                 mScreen.setChar(col, row, fillChar, keepVisualAttributes ? mScreen.getStyleAt(row, col) : style);
                                 }
                                 break;
@@ -1231,9 +1242,11 @@ public final class TerminalEmulator {
                             if (arg == 0 || arg == 2) {
                                 // DECSED and DECSEL can erase characters.
                                 mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+                                mProtectedMode = PROTECTED_MODE_DEC;
                             } else if (arg == 1) {
                                 // DECSED and DECSEL cannot erase characters.
                                 mEffect |= TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+                                mProtectedMode = PROTECTED_MODE_DEC;
                             } else {
                                 unknownSequence(b);
                             }
@@ -1414,7 +1427,8 @@ public final class TerminalEmulator {
                         mSession.write("\033P1$r" + currentSgrParameters() + "m\033\\");
                     } else if (dcs.equals("$q\"q")) {
                         // DECSCA, the character protection attribute.
-                        mSession.write("\033P1$r" + ((mEffect & TextStyle.CHARACTER_ATTRIBUTE_PROTECTED) != 0 ? 1 : 0) + "\"q\033\\");
+                        boolean decProtected = mProtectedMode == PROTECTED_MODE_DEC && (mEffect & TextStyle.CHARACTER_ATTRIBUTE_PROTECTED) != 0;
+                        mSession.write("\033P1$r" + (decProtected ? 1 : 0) + "\"q\033\\");
                     } else if (dcs.equals("$q$}")) {
                         // DECSASD, the main display is always the active one.
                         mSession.write("\033P1$r0$}\033\\");
@@ -2003,7 +2017,7 @@ public final class TerminalEmulator {
                     int firstCol = row == mCursorRow ? startCol : 0;
                     int lastCol = row == mCursorRow ? endCol : mColumns;
                     for (int col = firstCol; col < lastCol; col++) {
-                        if ((TextStyle.decodeEffect(mScreen.getStyleAt(row, col)) & TextStyle.CHARACTER_ATTRIBUTE_PROTECTED) == 0)
+                        if (!isCellProtectedFromErase(row, col, true))
                             mScreen.setChar(col, row, fillChar, style);
                     }
                 }
@@ -2429,6 +2443,13 @@ public final class TerminalEmulator {
                     setCursorRow(Math.max(mCursorRow >= mTopMargin ? mTopMargin : 0, mCursorRow - 1));
                 }
                 break;
+            case 'V': // SPA - Start of guarded area, the text that follows has ISO protection.
+                mProtectedMode = PROTECTED_MODE_ISO;
+                mEffect |= TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+                break;
+            case 'W': // EPA - End of guarded area. The mode stays, the cells that were written keep their protection.
+                mEffect &= ~TextStyle.CHARACTER_ATTRIBUTE_PROTECTED;
+                break;
             case 'N': // SS2, ignore.
             case '0': // SS3, ignore.
                 break;
@@ -2573,16 +2594,16 @@ public final class TerminalEmulator {
                 // ED ignores the scrolling margins.
                 switch (getArg0(0)) {
                     case 0: // Erase from the active position to the end of the screen, inclusive (default).
-                        blockClear(mCursorCol, mCursorRow, mColumns - mCursorCol);
-                        blockClear(0, mCursorRow + 1, mColumns, mRows - (mCursorRow + 1));
+                        eraseBlock(mCursorCol, mCursorRow, mColumns - mCursorCol, 1);
+                        eraseBlock(0, mCursorRow + 1, mColumns, mRows - (mCursorRow + 1));
                         break;
                     case 1: // Erase from start of the screen to the active position, inclusive.
-                        blockClear(0, 0, mColumns, mCursorRow);
-                        blockClear(0, mCursorRow, mCursorCol + 1);
+                        eraseBlock(0, 0, mColumns, mCursorRow);
+                        eraseBlock(0, mCursorRow, mCursorCol + 1, 1);
                         break;
                     case 2: // Erase all of the display - all lines are erased, changed to single-width, and the cursor does not
                         // move..
-                        blockClear(0, 0, mColumns, mRows);
+                        eraseBlock(0, 0, mColumns, mRows);
                         break;
                     case 3: // Delete all lines saved in the scrollback buffer (xterm etc)
                         mMainBuffer.clearTranscript();
@@ -2596,13 +2617,13 @@ public final class TerminalEmulator {
             case 'K': // "CSI{n}K" - Erase in line (EL).
                 switch (getArg0(0)) {
                     case 0: // Erase from the cursor to the end of the line, inclusive (default)
-                        blockClear(mCursorCol, mCursorRow, mColumns - mCursorCol);
+                        eraseBlock(mCursorCol, mCursorRow, mColumns - mCursorCol, 1);
                         break;
                     case 1: // Erase from the start of the screen to the cursor, inclusive.
-                        blockClear(0, mCursorRow, mCursorCol + 1);
+                        eraseBlock(0, mCursorRow, mCursorCol + 1, 1);
                         break;
                     case 2: // Erase all of the line.
-                        blockClear(0, mCursorRow, mColumns);
+                        eraseBlock(0, mCursorRow, mColumns, 1);
                         break;
                     default:
                         unknownSequence(b);
@@ -2677,7 +2698,7 @@ public final class TerminalEmulator {
                 break;
             case 'X': // "${CSI}${N}X" - Erase ${N:=1} character(s) (ECH). FIXME: Clears character attributes?
                 mAboutToAutoWrap = false;
-                mScreen.blockSet(mCursorCol, mCursorRow, Math.min(getArg0(1), mColumns - mCursorCol), 1, ' ', getStyle());
+                eraseBlock(mCursorCol, mCursorRow, Math.min(getArg0(1), mColumns - mCursorCol), 1);
                 break;
             case 'Z': // Cursor Backward Tabulation (CBT). Move the active position n tabs backward.
                 int numberOfTabs = getArg0(1);
@@ -3420,6 +3441,31 @@ public final class TerminalEmulator {
         blockClear(sx, sy, w, 1);
     }
 
+    /**
+     * True if an erase must not change the cell. Like xterm, the selective erases DECSED and DECSEL keep the cells with
+     * either kind of protection, while ED, EL and ECH only keep the cells with ISO protection. DECSCA protection is
+     * only for the selective erases.
+     */
+    private boolean isCellProtectedFromErase(int row, int col, boolean selectiveErase) {
+        if (mProtectedMode == PROTECTED_MODE_OFF) return false;
+        if (!selectiveErase && mProtectedMode != PROTECTED_MODE_ISO) return false;
+        return (TextStyle.decodeEffect(mScreen.getStyleAt(row, col)) & TextStyle.CHARACTER_ATTRIBUTE_PROTECTED) != 0;
+    }
+
+    /** Erases like {@link #blockClear(int, int, int, int)} for ED, EL and ECH, the cells with ISO protection stay. */
+    private void eraseBlock(int sx, int sy, int w, int h) {
+        if (mProtectedMode != PROTECTED_MODE_ISO) {
+            blockClear(sx, sy, w, h);
+            return;
+        }
+        long style = getStyle();
+        for (int row = sy; row < sy + h; row++) {
+            for (int col = sx; col < sx + w; col++) {
+                if (!isCellProtectedFromErase(row, col, false)) mScreen.setChar(col, row, ' ', style);
+            }
+        }
+    }
+
     private void blockClear(int sx, int sy, int w, int h) {
         mScreen.blockSet(sx, sy, w, h, ' ', getStyle());
     }
@@ -4048,6 +4094,7 @@ public final class TerminalEmulator {
         mLinefeedMode = false;
         mKeyboardLocked = false;
         mLocalEcho = false;
+        mProtectedMode = PROTECTED_MODE_OFF;
         mAttributeChangeExtent = 0;
         mSavedDecModes.clear();
         mEffect = 0;
