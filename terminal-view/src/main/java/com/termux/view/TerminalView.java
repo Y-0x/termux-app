@@ -864,6 +864,9 @@ public final class TerminalView extends View {
 
         if (mTermSession == null) return;
 
+        // The keyboard action mode KAM locks the keyboard, "reset" in the context menu unlocks it.
+        if (mEmulator != null && mEmulator.isKeyboardLocked()) return;
+
         // Ensure cursor is shown when a key is pressed down like long hold on (arrow) keys
         if (mEmulator != null)
             mEmulator.setCursorBlinkState(true);
@@ -920,6 +923,7 @@ public final class TerminalView extends View {
             mTermSession.writeCodePoint(altDown, codePoint);
             // In linefeed mode LNM the Enter key sends CR LF.
             if (codePoint == '\r' && mEmulator != null && mEmulator.isLinefeedMode()) mTermSession.writeCodePoint(false, '\n');
+            echoInput(new String(Character.toChars(codePoint)));
         }
     }
 
@@ -933,6 +937,8 @@ public final class TerminalView extends View {
             return true;
 
         TerminalEmulator term = mTermSession.getEmulator();
+        // The keyboard action mode KAM locks the keyboard.
+        if (term != null && term.isKeyboardLocked()) return true;
         if (keyMod == 0 && (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT)
                 && term != null && !term.isAlternateBufferActive()) {
             int visualDir = (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) ? -1 : 1;
@@ -956,9 +962,29 @@ public final class TerminalView extends View {
 
         String code = KeyHandler.getCode(keyCode, keyMod, term.isCursorKeysApplicationMode(), term.isKeypadApplicationMode());
         if (code == null) return false;
+        // In backarrow mode DECBKM the backspace key sends BS instead of DEL.
+        if (keyCode == KeyEvent.KEYCODE_DEL && keyMod == 0 && term.isBackarrowKeySendsBackspace()) code = "\b";
         // In linefeed mode LNM the Enter key sends CR LF.
         mTermSession.write(term.isLinefeedMode() && "\r".equals(code) ? "\r\n" : code);
+        echoInput(code);
         return true;
+    }
+
+    /**
+     * Shows the text that the keyboard sent on the screen while the terminal is in local echo mode, SRM is reset.
+     * The text of keys that send an escape sequence is not shown.
+     */
+    private void echoInput(String text) {
+        if (mEmulator == null || !mEmulator.isLocalEcho() || text.isEmpty() || text.charAt(0) == 27) return;
+        StringBuilder visible = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\r') visible.append("\r\n");
+            else if (c == '\t' || (c >= ' ' && c != 127)) visible.append(c);
+        }
+        byte[] bytes = visible.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        mEmulator.append(bytes, bytes.length);
+        onScreenUpdated();
     }
 
     static final int ARROW_STEP_FALLBACK = Integer.MIN_VALUE;
