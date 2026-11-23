@@ -390,6 +390,9 @@ public final class TerminalEmulator {
     /** ANSI mode 2, KAM. While it is set the keyboard is locked, see {@link #isKeyboardLocked()}. */
     private boolean mKeyboardLocked;
 
+    /** The argument of the last DECSACE, 0 and 1 are a stream of characters and 2 is a rectangle. */
+    private int mAttributeChangeExtent;
+
     private static final int COLUMNS_IN_WIDE_MODE = 132;
 
     /** DECSET 40. The 132 column mode DECCOLM only works while this is set. */
@@ -1333,6 +1336,7 @@ public final class TerminalEmulator {
                         if (b == 'x' && (attributeChangeExtent >= 0 && attributeChangeExtent <= 2)) {
                             // Select attribute change extent (DECSACE - http://www.vt100.net/docs/vt510-rm/DECSACE).
                             setDecsetinternalBit(DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE, attributeChangeExtent == 2);
+                            mAttributeChangeExtent = attributeChangeExtent;
                         } else if (b == 'y') {
                             // Request checksum of rectangular area, DECRQCRA. The page argument is ignored.
                             // Coordinates are relative to the margins in origin mode, like CUP.
@@ -1417,6 +1421,15 @@ public final class TerminalEmulator {
                     } else if (dcs.equals("$q$~")) {
                         // DECSSDT, there is no status line.
                         mSession.write("\033P1$r0$~\033\\");
+                    } else if (dcs.equals("$q*x")) {
+                        // DECSACE, the extent of attribute changes of DECCARA and DECRARA.
+                        mSession.write("\033P1$r" + mAttributeChangeExtent + "*x\033\\");
+                    } else if (dcs.equals("$qt")) {
+                        // DECSLPP, the lines per page. The page has the rows of the screen.
+                        mSession.write("\033P1$r" + mRows + "t\033\\");
+                    } else if (dcs.equals("$q*|")) {
+                        // DECSNLS, the lines per screen.
+                        mSession.write("\033P1$r" + mRows + "*|\033\\");
                     } else if (dcs.equals("$qr")) {
                         // DECSTBM, top and bottom margins.
                         mSession.write("\033P1$r" + (mTopMargin + 1) + ";" + mBottomMargin + "r\033\\");
@@ -4035,6 +4048,7 @@ public final class TerminalEmulator {
         mLinefeedMode = false;
         mKeyboardLocked = false;
         mLocalEcho = false;
+        mAttributeChangeExtent = 0;
         mSavedDecModes.clear();
         mEffect = 0;
         mRememberedDecModes = 0;
