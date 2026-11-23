@@ -426,6 +426,11 @@ public final class TerminalEmulator {
     }
 
     /** The ANSI modes GATM, SRTM, VEM, HEM, PUM, FEAM, FETM, MATM, TTM, SATM, TSM and EBM, which are never set. */
+    /** The DEC private modes that the terminal does not have, DECRQM reports them as permanently reset. */
+    private static boolean isPermanentlyResetDecMode(int mode) {
+        return mode == 60; // DECHCCM, there is no horizontal scrolling.
+    }
+
     private static boolean isPermanentlyResetAnsiMode(int mode) {
         return mode == 1 || mode == 5 || (mode >= 7 && mode <= 11) || (mode >= 13 && mode <= 19);
     }
@@ -435,7 +440,11 @@ public final class TerminalEmulator {
             case 4: return 1; // DECSCLM.
             case 18: return 1 << 1; // DECPFF.
             case 19: return 1 << 2; // DECPEX.
-            case 60: return 1 << 3; // DECHCCM.
+            case 35: return 1 << 3; // DECHEBM.
+            case 41: return 1 << 4; // The more fix of xterm for curses, see tabToNextStop.
+            case 42: return 1 << 5; // DECNRCM.
+            case 67: return 1 << 6; // DECBKM.
+            case 95: return 1 << 7; // DECNCSM.
             default: return 0;
         }
     }
@@ -777,6 +786,11 @@ public final class TerminalEmulator {
 
 
 
+    /** True after "CSI ? 67 h", then the backarrow key sends backspace instead of delete. */
+    public boolean isBackarrowKeySendsBackspace() {
+        return (mRememberedDecModes & rememberedDecModeBit(67)) != 0;
+    }
+
     /** True after "CSI 2 h", then the keyboard is locked and the terminal sends nothing for keys. */
     public boolean isKeyboardLocked() {
         return mKeyboardLocked;
@@ -940,7 +954,7 @@ public final class TerminalEmulator {
                 //       printf "\033[41m\t\r\033[42m\tXX\033[0m\n"
                 // the first cells are created with a red background, but when tabbing over
                 // them again with a green background they are not overwritten.
-                mCursorCol = nextTabStop(1);
+                tabToNextStop();
                 break;
             case 10: // Line feed (LF, \n).
             case 11: // Vertical tab (VT, \v).
@@ -1236,6 +1250,8 @@ public final class TerminalEmulator {
                                 // DECSET 12 (att610) - start/stop blinking cursor.
                                 // Supported for set/reset and must also be queryable via DECRQM, matching xterm.
                                 value = isCursorBlinking() ? 1 : 2;
+                            } else if (isPermanentlyResetDecMode(mode)) {
+                                value = 4;
                             } else if (rememberedDecModeBit(mode) != 0) {
                                 value = (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
                             } else {
@@ -2056,8 +2072,13 @@ public final class TerminalEmulator {
             case 4: // DECSCLM-Scrolling Mode.
             case 18: // DECPFF - Print form feed.
             case 19: // DECPEX - Print extent.
-            case 60: // DECHCCM - Horizontal cursor coupling.
-                // None of these has an effect, they are only remembered.
+            case 35: // DECHEBM - Hebrew encoding.
+            case 41: // More fix for curses, see the tab handling.
+            case 42: // DECNRCM - National replacement character sets.
+            case 67: // DECBKM - Backarrow key sends backspace, see isBackarrowKeySendsBackspace().
+            case 95: // DECNCSM - No clearing of the screen on a column change, see DECCOLM.
+                // The ones without a note have no effect, they are only remembered.
+                if (externalBit == 95 && !isConformanceLevelAtLeast(5)) break;
                 if (setting) mRememberedDecModes |= rememberedDecModeBit(externalBit);
                 else mRememberedDecModes &= ~rememberedDecModeBit(externalBit);
                 break;
@@ -3791,6 +3812,20 @@ public final class TerminalEmulator {
     }
 
     /** Go to the left margin, or to the screen edge when left of the margin and origin mode is off. */
+    /**
+     * Moves to the next tab stop. In the more fix mode of xterm, DECSET 41, a tab that follows text up to the right
+     * edge first wraps to the next line. Curses depends on it when it draws to the end of a row and then tabs.
+     */
+    private void tabToNextStop() {
+        boolean moreFix = (mRememberedDecModes & rememberedDecModeBit(41)) != 0;
+        if (moreFix && mAboutToAutoWrap && isDecsetInternalBitSet(DECSET_BIT_AUTOWRAP)) {
+            doLinefeed();
+            carriageReturn();
+            mAboutToAutoWrap = false;
+        }
+        mCursorCol = nextTabStop(1);
+    }
+
     private void carriageReturn() {
         boolean originMode = isDecsetInternalBitSet(DECSET_BIT_ORIGIN_MODE);
         setCursorCol(originMode || mCursorCol >= mLeftMargin ? mLeftMargin : 0);
