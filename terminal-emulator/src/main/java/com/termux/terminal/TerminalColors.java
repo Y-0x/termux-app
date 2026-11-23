@@ -14,6 +14,33 @@ public final class TerminalColors {
      */
     public final int[] mCurrentColors = new int[TextStyle.NUM_INDEXED_COLORS];
 
+    public static final int NUM_SPECIAL_COLORS = 5;
+
+    /**
+     * The special colors of xterm for bold, underline, blink, reverse and italic as ARGB, 0 if not set. The terminal
+     * keeps them for OSC 4, OSC 5 and OSC 105 but does not draw with them.
+     */
+    private final int[] mSpecialColors = new int[NUM_SPECIAL_COLORS];
+
+    /** The special color, or the foreground color if it was not set. */
+    public int getSpecialColor(int index) {
+        return mSpecialColors[index] != 0 ? mSpecialColors[index] : mCurrentColors[TextStyle.COLOR_INDEX_FOREGROUND];
+    }
+
+    /** Try parse a color from a text parameter into a special color. */
+    public void tryParseSpecialColor(int index, String textParameter) {
+        int c = parse(textParameter);
+        if (c != 0) mSpecialColors[index] = c;
+    }
+
+    public void resetSpecialColor(int index) {
+        if (index >= 0 && index < NUM_SPECIAL_COLORS) mSpecialColors[index] = 0;
+    }
+
+    public void resetSpecialColors() {
+        java.util.Arrays.fill(mSpecialColors, 0);
+    }
+
     /** Create a new instance with default colors from the theme. */
     public TerminalColors() {
         reset();
