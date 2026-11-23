@@ -502,8 +502,35 @@ public final class TerminalEmulator {
 
     private static final String LOG_TAG = "TerminalEmulator";
 
-    /** The answer to DA1 and DECID, a VT420 with the features that are implemented, like xterm. */
-    private static final String PRIMARY_DEVICE_ATTRIBUTES = "\033[?64;1;2;4;6;9;15;18;21;22c";
+    /** The VT conformance level from DECSCL as 61 to 65. The default is the highest level, like xterm. */
+    private int mConformanceLevel = 65;
+
+    /** True if the conformance level is VT level {@code vtLevel} or higher, the levels are 1 to 5. */
+    private boolean isConformanceLevelAtLeast(int vtLevel) {
+        return mConformanceLevel >= 60 + vtLevel;
+    }
+
+    /** The answer to DA1 and DECID. It lists the features of the conformance level in the same way as xterm. */
+    private String primaryDeviceAttributes() {
+        switch (mConformanceLevel) {
+            case 61:
+                return "\033[?1;2c";
+            case 62:
+                return "\033[?62;1;2;4;6;9;15;22;29c";
+            case 63:
+                return "\033[?63;1;2;4;6;9;15;22;29c";
+            case 64:
+                return "\033[?64;1;2;4;6;9;15;16;17;18;21;22;28;29c";
+            default:
+                return "\033[?65;1;2;4;6;9;15;16;17;18;21;22;28;29c";
+        }
+    }
+
+    /** The answer to DA2. The first number is the terminal type of the conformance level, then the firmware and the keyboard. */
+    private String secondaryDeviceAttributes() {
+        final int[] terminalTypes = {0, 1, 24, 41, 64};
+        return "\033[>" + terminalTypes[mConformanceLevel - 61] + ";320;0c";
+    }
 
     private boolean isDecsetInternalBitSet(int bit) {
         return (mCurrentDecSetFlags & bit) != 0;
@@ -1116,7 +1143,16 @@ public final class TerminalEmulator {
                         }
                         break;
                     case ESC_CSI_DOUBLE_QUOTE:
-                        if (b == 'q') {
+                        if (b == 'p') {
+                            // DECSCL, set the conformance level, http://www.vt100.net/docs/vt510-rm/DECSCL.
+                            // Like xterm this is a soft reset. The second argument selects 7-bit or 8-bit controls,
+                            // the controls are always 7-bit here, so it is ignored.
+                            int level = getArg0(0);
+                            if (level >= 61 && level <= 65) {
+                                reset();
+                                mConformanceLevel = level;
+                            }
+                        } else if (b == 'q') {
                             // http://www.vt100.net/docs/vt510-rm/DECSCA
                             int arg = getArg0(0);
                             if (arg == 0 || arg == 2) {
@@ -1137,7 +1173,7 @@ public final class TerminalEmulator {
                             && mCursorCol >= mLeftMargin && mCursorCol < mRightMargin;
                         int regionRows = mBottomMargin - mTopMargin;
                         if (b == '}') { // Insert Ps Column(s) (default = 1) (DECIC), VT420 and up.
-                            if (inMargins) {
+                            if (inMargins && isConformanceLevelAtLeast(4)) {
                                 int columnsAfterCursor = mRightMargin - mCursorCol;
                                 int columnsToInsert = Math.min(getArg0(1), columnsAfterCursor);
                                 int columnsToMove = columnsAfterCursor - columnsToInsert;
@@ -1145,7 +1181,7 @@ public final class TerminalEmulator {
                                 blockClear(mCursorCol, mTopMargin, columnsToInsert, regionRows);
                             }
                         } else if (b == '~') { // Delete Ps Column(s) (default = 1) (DECDC), VT420 and up.
-                            if (inMargins) {
+                            if (inMargins && isConformanceLevelAtLeast(4)) {
                                 int columnsAfterCursor = mRightMargin - mCursorCol;
                                 int columnsToDelete = Math.min(getArg0(1), columnsAfterCursor);
                                 int columnsToMove = columnsAfterCursor - columnsToDelete;
@@ -1168,7 +1204,10 @@ public final class TerminalEmulator {
                         doDcs(b);
                         break;
                     case ESC_CSI_QUESTIONMARK_ARG_DOLLAR:
-                        if (b == 'p') {
+                        if (b == 'p' && !isConformanceLevelAtLeast(3)) {
+                            // DECRQM is from VT level 3.
+                            unknownSequence(b);
+                        } else if (b == 'p') {
                             // Request DEC private mode (DECRQM).
                             int mode = getArg0(0);
                             int value;
@@ -1306,8 +1345,8 @@ public final class TerminalEmulator {
                 if (dcs.startsWith("$q")) {
                     if (dcs.equals("$q\"p")) {
                         // DECSCL, conformance level, http://www.vt100.net/docs/vt510-rm/DECSCL:
-                        String csiString = "64;1\"p";
-                        mSession.write("\033P1$r" + csiString + "\033\\");
+                        // The second number is 1 for 7-bit controls.
+                        mSession.write("\033P1$r" + mConformanceLevel + ";1\"p\033\\");
                     } else if (dcs.equals("$q q")) {
                         // DECSCUSR, report the cursor style the same way as xterm.
                         // Values 1 and 2 are block, 3 and 4 underline, 5 and 6 bar, odd values blink.
@@ -1973,6 +2012,8 @@ public final class TerminalEmulator {
     }
 
     public void doDecSetOrReset(boolean setting, int externalBit) {
+        // The left and right margins are from VT level 4.
+        if (externalBit == 69 && !isConformanceLevelAtLeast(4)) return;
         int internalBit = mapDecSetBitToInternalBit(externalBit);
         if (internalBit != -1) {
             setDecsetinternalBit(internalBit, setting);
@@ -2100,7 +2141,7 @@ public final class TerminalEmulator {
                 // * vim checks xterm version number >140 for "Request termcap/terminfo string" functionality >276 for SGR
                 // mouse report.
                 // The third number is a keyboard identifier not used nowadays.
-                mSession.write("\033[>41;320;0c");
+                mSession.write(secondaryDeviceAttributes());
                 break;
             case 'm':
                 // https://bugs.launchpad.net/gnome-terminal/+bug/96676/comments/25
@@ -2256,10 +2297,11 @@ public final class TerminalEmulator {
                 }
                 break;
             case 'Z': // DECID - Identify Terminal (http://vt100.net/docs/vt510-rm/DECID), the same as DA1.
-                mSession.write(PRIMARY_DEVICE_ATTRIBUTES);
+                mSession.write(primaryDeviceAttributes());
                 break;
             case 'c': // RIS - Reset to Initial State (http://vt100.net/docs/vt510-rm/RIS).
                 reset();
+                mConformanceLevel = 65;
                 mMainBuffer.clearTranscript();
                 blockClear(0, 0, mColumns, mRows);
                 setCursorPosition(0, 0);
@@ -2371,10 +2413,14 @@ public final class TerminalEmulator {
                 continueSequence(ESC_CSI_SINGLE_QUOTE);
                 break;
             case '$':
-                continueSequence(ESC_CSI_DOLLAR);
+                // The sequences with a dollar sign are from VT level 3.
+                if (isConformanceLevelAtLeast(3)) continueSequence(ESC_CSI_DOLLAR);
+                else unknownSequence(b);
                 break;
             case '*':
-                continueSequence(ESC_CSI_ARGS_ASTERIX);
+                // The sequences with an asterisk are from VT level 4.
+                if (isConformanceLevelAtLeast(4)) continueSequence(ESC_CSI_ARGS_ASTERIX);
+                else unknownSequence(b);
                 break;
             case '@': {
                 // "CSI{n}@" - Insert ${n} space characters (ICH) - http://www.vt100.net/docs/vt510-rm/ICH.
@@ -2569,7 +2615,7 @@ public final class TerminalEmulator {
                 // The important part that may still be used by some (tmux stores this value but does not currently use it)
                 // is the first response parameter identifying the terminal service class, where we send 64 for "vt420".
                 // This is followed by a list of attributes which is probably unused by applications. Send like xterm.
-                if (getArg0(0) == 0) mSession.write(PRIMARY_DEVICE_ATTRIBUTES);
+                if (getArg0(0) == 0) mSession.write(primaryDeviceAttributes());
                 break;
             case 'd': // ESC [ Pn d - Vert Position Absolute
                 // Relative to the margins in origin mode, like CUP.
