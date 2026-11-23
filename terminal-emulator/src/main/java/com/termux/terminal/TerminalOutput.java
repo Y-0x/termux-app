@@ -29,4 +29,11 @@ public abstract class TerminalOutput {
 
     public abstract void onColorsChanged();
 
+    /**
+     * Notify the terminal client that the emulator changed its own size, which DECCOLM does. The client has to give the
+     * size to the pty. It is not called when the size comes from the client, see TerminalEmulator.resize().
+     */
+    public void onEmulatorResized(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
+    }
+
 }
