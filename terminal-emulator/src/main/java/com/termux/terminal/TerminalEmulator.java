@@ -4,6 +4,7 @@ import android.util.Base64;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Stack;
@@ -388,6 +389,9 @@ public final class TerminalEmulator {
 
     /** ANSI mode 2, KAM. While it is set the keyboard is locked, see {@link #isKeyboardLocked()}. */
     private boolean mKeyboardLocked;
+
+    /** The values of the DEC private modes that were saved with "CSI ? Pm s", true is set. */
+    private final HashMap<Integer, Boolean> mSavedDecModes = new HashMap<>();
 
     /** ANSI mode 12, SRM. While it is reset the terminal echoes what the keyboard sends, see {@link #isLocalEcho()}. */
     private boolean mLocalEcho;
@@ -1242,27 +1246,8 @@ public final class TerminalEmulator {
                         } else if (b == 'p') {
                             // Request DEC private mode (DECRQM).
                             int mode = getArg0(0);
-                            int value;
-                            if (mode == 47 || mode == 1047 || mode == 1049) {
-                                // This state is carried by mScreen pointer.
-                                value = (mScreen == mAltBuffer) ? 1 : 2;
-                            } else if (mode == 12) {
-                                // DECSET 12 (att610) - start/stop blinking cursor.
-                                // Supported for set/reset and must also be queryable via DECRQM, matching xterm.
-                                value = isCursorBlinking() ? 1 : 2;
-                            } else if (isPermanentlyResetDecMode(mode)) {
-                                value = 4;
-                            } else if (rememberedDecModeBit(mode) != 0) {
-                                value = (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
-                            } else {
-                                int internalBit = mapDecSetBitToInternalBit(mode);
-                                if (internalBit != -1) {
-                                    value = isDecsetInternalBitSet(internalBit) ? 1 : 2; // 1=set, 2=reset.
-                                } else {
-                                    Logger.logError(mClient, LOG_TAG, "Got DECRQM for unrecognized private DEC mode=" + mode);
-                                    value = 0; // 0=not recognized, 3=permanently set, 4=permanently reset
-                                }
-                            }
+                            int value = decPrivateModeValue(mode);
+                            if (value == 0) Logger.logError(mClient, LOG_TAG, "Got DECRQM for unrecognized private DEC mode=" + mode);
                             mSession.write(String.format(Locale.US, "\033[?%d;%d$y", mode, value));
                         } else {
                             unknownSequence(b);
@@ -2024,16 +2009,16 @@ public final class TerminalEmulator {
             case 's':
                 if (mArgIndex >= mArgs.length) mArgIndex = mArgs.length - 1;
                 for (int i = 0; i <= mArgIndex; i++) {
-                    int externalBit = mArgs[i];
-                    int internalBit = mapDecSetBitToInternalBit(externalBit);
-                    if (internalBit == -1) {
-                        Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save/recall decset bit=" + externalBit);
+                    int mode = mArgs[i];
+                    if (b == 's') {
+                        // Save the value that the mode has now, also when it is reset.
+                        int value = decPrivateModeValue(mode);
+                        if (value == 1 || value == 2) mSavedDecModes.put(mode, value == 1);
+                        else Logger.logWarn(mClient, LOG_TAG, "Ignoring request to save decset bit=" + mode);
                     } else {
-                        if (b == 's') {
-                            mSavedDecSetFlags |= internalBit;
-                        } else {
-                            doDecSetOrReset((mSavedDecSetFlags & internalBit) != 0, externalBit);
-                        }
+                        Boolean saved = mSavedDecModes.get(mode);
+                        if (saved != null) doDecSetOrReset(saved, mode);
+                        else Logger.logWarn(mClient, LOG_TAG, "Ignoring request to recall decset bit=" + mode);
                     }
                 }
                 break;
@@ -2043,6 +2028,23 @@ public final class TerminalEmulator {
             default:
                 parseArg(b);
         }
+    }
+
+    /**
+     * The state of a DEC private mode as DECRQM reports it: 1 is set, 2 is reset, 3 is permanently set,
+     * 4 is permanently reset and 0 is not recognized.
+     */
+    private int decPrivateModeValue(int mode) {
+        if (mode == 47 || mode == 1047 || mode == 1049) {
+            // This state is carried by mScreen pointer.
+            return (mScreen == mAltBuffer) ? 1 : 2;
+        }
+        if (mode == 12) return isCursorBlinking() ? 1 : 2;
+        if (isPermanentlyResetDecMode(mode)) return 4;
+        if (rememberedDecModeBit(mode) != 0) return (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
+        int internalBit = mapDecSetBitToInternalBit(mode);
+        if (internalBit == -1) return 0;
+        return isDecsetInternalBitSet(internalBit) ? 1 : 2;
     }
 
     public void doDecSetOrReset(boolean setting, int externalBit) {
@@ -3989,6 +3991,7 @@ public final class TerminalEmulator {
         mLinefeedMode = false;
         mKeyboardLocked = false;
         mLocalEcho = false;
+        mSavedDecModes.clear();
         mEffect = 0;
         mRememberedDecModes = 0;
         mTopMargin = mLeftMargin = 0;
