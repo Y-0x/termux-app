@@ -386,6 +386,12 @@ public final class TerminalEmulator {
     /** Linefeed mode LNM, where LF, VT and FF also move the cursor to the left margin. */
     private boolean mLinefeedMode;
 
+    /** ANSI mode 2, KAM. While it is set the keyboard is locked, see {@link #isKeyboardLocked()}. */
+    private boolean mKeyboardLocked;
+
+    /** ANSI mode 12, SRM. While it is reset the terminal echoes what the keyboard sends, see {@link #isLocalEcho()}. */
+    private boolean mLocalEcho;
+
     /** DEC modes that have no effect here but are remembered, so that DECRQM reports what the application set. */
     private int mRememberedDecModes;
 
@@ -771,6 +777,16 @@ public final class TerminalEmulator {
 
 
 
+    /** True after "CSI 2 h", then the keyboard is locked and the terminal sends nothing for keys. */
+    public boolean isKeyboardLocked() {
+        return mKeyboardLocked;
+    }
+
+    /** True after "CSI 12 l", then the terminal also shows what the keyboard sends. */
+    public boolean isLocalEcho() {
+        return mLocalEcho;
+    }
+
     /** True after "CSI 20 h", then the Enter key sends CR LF instead of CR. */
     public boolean isLinefeedMode() {
         return mLinefeedMode;
@@ -1021,6 +1037,8 @@ public final class TerminalEmulator {
                                 int ansiValue;
                                 if (ansiMode == 4) ansiValue = mInsertMode ? 1 : 2;
                                 else if (ansiMode == 20) ansiValue = mLinefeedMode ? 1 : 2;
+                                else if (ansiMode == 2) ansiValue = mKeyboardLocked ? 1 : 2;
+                                else if (ansiMode == 12) ansiValue = mLocalEcho ? 2 : 1;
                                 else if (isPermanentlyResetAnsiMode(ansiMode)) ansiValue = 4;
                                 else ansiValue = 0;
                                 mSession.write(String.format(Locale.US, "\033[%d;%d$y", ansiMode, ansiValue));
@@ -3348,6 +3366,14 @@ public final class TerminalEmulator {
                 // http://www.vt100.net/docs/vt510-rm/LNM
                 mLinefeedMode = newValue;
                 break;
+            case 2: // Set locks the keyboard, reset unlocks it, KAM.
+                // http://www.vt100.net/docs/vt510-rm/KAM
+                mKeyboardLocked = newValue;
+                break;
+            case 12: // Set sends only, reset echoes the keyboard to the screen, SRM.
+                // http://www.vt100.net/docs/vt510-rm/SRM
+                mLocalEcho = !newValue;
+                break;
             case 34:
                 // Normal cursor visibility - when using TERM=screen, see
                 // http://www.gnu.org/software/screen/manual/html_node/Control-Sequences.html
@@ -3926,6 +3952,8 @@ public final class TerminalEmulator {
         mEscapeState = ESC_NONE;
         mInsertMode = false;
         mLinefeedMode = false;
+        mKeyboardLocked = false;
+        mLocalEcho = false;
         mEffect = 0;
         mRememberedDecModes = 0;
         mTopMargin = mLeftMargin = 0;
