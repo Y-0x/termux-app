@@ -3203,40 +3203,13 @@ public final class TerminalEmulator {
                 // If a "?" is given rather than a name or RGB specification, xterm replies with a control sequence of the
                 // same form which can be used to set the corresponding color. Because more than one pair of color number
                 // and specification can be given in one control sequence, xterm can make more than one reply.
-                int colorIndex = -1;
-                int parsingPairStart = -1;
-                for (int i = 0; ; i++) {
-                    boolean endOfInput = i == textParameter.length();
-                    char b = endOfInput ? ';' : textParameter.charAt(i);
-                    if (b == ';') {
-                        if (parsingPairStart < 0) {
-                            parsingPairStart = i + 1;
-                        } else {
-                            if (colorIndex < 0 || colorIndex > 255) {
-                                unknownSequence(b);
-                                return;
-                            } else {
-                                String pairSpec = textParameter.substring(parsingPairStart, i);
-                                if ("?".equals(pairSpec)) {
-                                    mSession.write("\033]4;" + colorIndex + ";" + formatColorReport(mColors.mCurrentColors[colorIndex]) + bellOrStringTerminator);
-                                } else {
-                                    mColors.tryParseColor(colorIndex, pairSpec);
-                                    mSession.onColorsChanged();
-                                }
-                                colorIndex = -1;
-                                parsingPairStart = -1;
-                            }
-                        }
-                    } else if (parsingPairStart >= 0) {
-                        // We have passed a color index and are now going through color spec.
-                    } else if (parsingPairStart < 0 && (b >= '0' && b <= '9')) {
-                        colorIndex = ((colorIndex < 0) ? 0 : colorIndex * 10) + (b - '0');
-                    } else {
-                        unknownSequence(b);
-                        return;
-                    }
-                    if (endOfInput) break;
-                }
+                changeColors(4, textParameter, bellOrStringTerminator);
+                break;
+            case 5:
+                // Ps = 5 ; c ; spec → Change Special Color Number c to the color specified by spec, the numbers are 0
+                // for bold, 1 for underline, 2 for blink, 3 for reverse and 4 for italic. This is the same as OSC 4 with
+                // the numbers 256 to 260, and the reply has the same form as the query.
+                changeColors(5, textParameter, bellOrStringTerminator);
                 break;
             case 10: // Set foreground color.
             case 11: // Set background color.
@@ -3279,6 +3252,21 @@ public final class TerminalEmulator {
                     Logger.logError(mClient, LOG_TAG, "OSC Manipulate selection, invalid string '" + textParameter + "'");
                 }
                 break;
+            case 105:
+                // "105;$c" → Reset Special Color Number $c, the numbers are the ones of OSC 5. Without a number all the
+                // special colors are reset.
+                if (textParameter.isEmpty()) {
+                    mColors.resetSpecialColors();
+                } else {
+                    for (String number : textParameter.split(";")) {
+                        try {
+                            mColors.resetSpecialColor(Integer.parseInt(number));
+                        } catch (NumberFormatException e) {
+                            // Ignore.
+                        }
+                    }
+                }
+                break;
             case 104:
                 // "104;$c" → Reset Color Number $c. It is reset to the color specified by the corresponding X
                 // resource. Any number of c parameters may be given. These parameters correspond to the ANSI colors 0-7,
@@ -3294,8 +3282,12 @@ public final class TerminalEmulator {
                         if (endOfInput || textParameter.charAt(charIndex) == ';') {
                             try {
                                 int colorToReset = Integer.parseInt(textParameter.substring(lastIndex, charIndex));
-                                mColors.reset(colorToReset);
-                                mSession.onColorsChanged();
+                                if (colorToReset >= 0 && colorToReset < SPECIAL_COLOR_OFFSET) {
+                                    mColors.reset(colorToReset);
+                                    mSession.onColorsChanged();
+                                } else {
+                                    mColors.resetSpecialColor(colorToReset - SPECIAL_COLOR_OFFSET);
+                                }
                                 if (endOfInput) break;
                                 charIndex++;
                                 lastIndex = charIndex;
@@ -3897,6 +3889,44 @@ public final class TerminalEmulator {
     }
 
     /** Format a color as the 16 bit per channel text used in xterm color reports. */
+    /** The number that OSC 4 gives to the first special color, the ones before it are the indexed colors. */
+    private static final int SPECIAL_COLOR_OFFSET = 256;
+
+    /**
+     * Handles the pairs of a color number and a color for OSC 4 and OSC 5. A question mark in place of the color
+     * asks for a report. The report for a special color is only as accurate as what was set, special colors are kept for
+     * the programs, they are not used to draw.
+     */
+    private void changeColors(int oscNumber, String textParameter, String terminator) {
+        String[] parts = textParameter.split(";", -1);
+        for (int i = 0; i + 1 < parts.length; i += 2) {
+            int number;
+            try {
+                number = Integer.parseInt(parts[i]);
+            } catch (NumberFormatException e) {
+                unknownSequence('4');
+                return;
+            }
+            // Number of the special color, or -1 for an indexed color.
+            int special = oscNumber == 5 ? number : (number >= SPECIAL_COLOR_OFFSET ? number - SPECIAL_COLOR_OFFSET : -1);
+            boolean valid = special >= 0 ? special < TerminalColors.NUM_SPECIAL_COLORS : (number >= 0 && number < SPECIAL_COLOR_OFFSET);
+            if (!valid) {
+                unknownSequence('4');
+                return;
+            }
+            String spec = parts[i + 1];
+            if ("?".equals(spec)) {
+                int rgb = special >= 0 ? mColors.getSpecialColor(special) : mColors.mCurrentColors[number];
+                mSession.write("\033]" + oscNumber + ";" + number + ";" + formatColorReport(rgb) + terminator);
+            } else if (special >= 0) {
+                mColors.tryParseSpecialColor(special, spec);
+            } else {
+                mColors.tryParseColor(number, spec);
+                mSession.onColorsChanged();
+            }
+        }
+    }
+
     private static String formatColorReport(int rgb) {
         int r = (65535 * ((rgb >> 16) & 0xFF)) / 255;
         int g = (65535 * ((rgb >> 8) & 0xFF)) / 255;
@@ -4124,6 +4154,7 @@ public final class TerminalEmulator {
         mUtf8Index = mUtf8ToFollow = 0;
 
         mColors.reset();
+        mColors.resetSpecialColors();
         mSession.onColorsChanged();
 
         clearTerminalControlArgs();
