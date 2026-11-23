@@ -104,7 +104,7 @@ public final class TerminalSession extends TerminalOutput {
         if (mEmulator == null) {
             initializeEmulator(columns, rows, cellWidthPixels, cellHeightPixels);
         } else {
-            JNI.setPtyWindowSize(mTerminalFileDescriptor, rows, columns, cellWidthPixels, cellHeightPixels);
+            JNI.setPtyWindowSize(mTerminalFileDescriptor, rows, mEmulator.effectiveColumns(columns), cellWidthPixels, cellHeightPixels);
             mEmulator.resize(columns, rows, cellWidthPixels, cellHeightPixels);
         }
     }
@@ -287,6 +287,11 @@ public final class TerminalSession extends TerminalOutput {
     @Override
     public void onColorsChanged() {
         mClient.onColorsChanged(this);
+    }
+
+    @Override
+    public void onEmulatorResized(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
+        JNI.setPtyWindowSize(mTerminalFileDescriptor, rows, columns, cellWidthPixels, cellHeightPixels);
     }
 
     public int getPid() {
