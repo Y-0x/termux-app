@@ -404,6 +404,12 @@ public final class TerminalEmulator {
     /** The argument of the last DECSACE, 0 and 1 are a stream of characters and 2 is a rectangle. */
     private int mAttributeChangeExtent;
 
+    /**
+     * DECSET 2027, grapheme clustering. The terminal always clusters the characters of an emoji sequence into one cell,
+     * see {@link WcWidth#width(char[], int, int)}, so DECRQM says that the mode is permanently set.
+     */
+    private static final int GRAPHEME_CLUSTERING_MODE = 2027;
+
     /** The columns of DECCOLM when it is reset and when it is set. */
     private static final int COLUMNS_IN_NARROW_MODE = 80;
     private static final int COLUMNS_IN_WIDE_MODE = 132;
@@ -2120,6 +2126,7 @@ public final class TerminalEmulator {
         if (isPermanentlyResetDecMode(mode)) return 4;
         if (mode == 3) return mColumnMode == COLUMN_MODE_WIDE ? 1 : 2;
         if (mode == 40) return mAllow80To132 ? 1 : 2;
+        if (mode == GRAPHEME_CLUSTERING_MODE) return 3;
         if (rememberedDecModeBit(mode) != 0) return (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
         int internalBit = mapDecSetBitToInternalBit(mode);
         if (internalBit == -1) return 0;
@@ -3862,7 +3869,12 @@ public final class TerminalEmulator {
         }
 
         final boolean autoWrap = isDecsetInternalBitSet(DECSET_BIT_AUTOWRAP);
-        final int displayWidth = WcWidth.width(codePoint);
+        // The cell that a combining character or a character of an emoji sequence belongs to.
+        final int cellColumn = mCursorCol - (mAboutToAutoWrap ? 0 : 1);
+        final int ownDisplayWidth = WcWidth.width(codePoint);
+        final boolean joinsCell = ownDisplayWidth > 0 && cellColumn >= 0 && WcWidth.mayJoinCell(codePoint)
+            && mScreen.cellJoins(cellColumn, mCursorRow, codePoint);
+        final int displayWidth = joinsCell ? 0 : ownDisplayWidth;
         final boolean cursorInLastColumn = mCursorCol == mRightMargin - 1;
 
         if (autoWrap) {
@@ -3896,15 +3908,32 @@ public final class TerminalEmulator {
         // so was mCursorCol changed after the offsetDueToCombiningChar conditional by another thread?
         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
         if (column < 0) column = 0;
-        mScreen.setChar(column, mCursorRow, codePoint, getStyle(), currentUnderlineColor());
 
-        if (autoWrap && displayWidth > 0)
-            mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
+        // U+FE0F makes a narrow emoji wide, so the cell takes one more column, and the cursor has to follow it.
+        int widerBy = 0;
+        if (displayWidth <= 0 && WcWidth.isEmojiVariationSelector(codePoint)) {
+            widerBy = mScreen.cellWidthWith(column, mCursorRow, codePoint) - mScreen.cellWidth(column, mCursorRow);
+            // Without a column left of the right margin the cell stays narrow.
+            if (widerBy > 0 && column + mScreen.cellWidth(column, mCursorRow) + widerBy > mRightMargin) return;
+        }
 
-        mCursorCol = Math.min(mCursorCol + displayWidth, mRightMargin - 1);
+        if (mInsertMode && widerBy > 0) {
+            // Move the characters right of the cell one more column to the right.
+            final int cellEnd = column + mScreen.cellWidth(column, mCursorRow);
+            if (cellEnd + widerBy < mRightMargin)
+                mScreen.blockCopy(cellEnd, mCursorRow, mRightMargin - cellEnd - widerBy, 1, cellEnd + widerBy, mCursorRow);
+        }
+
+        if (joinsCell) mScreen.appendToCell(column, mCursorRow, codePoint, getStyle(), currentUnderlineColor());
+        else mScreen.setChar(column, mCursorRow, codePoint, getStyle(), currentUnderlineColor());
+
+        final int advance = displayWidth > 0 ? displayWidth : Math.max(widerBy, 0);
+        if (autoWrap && advance > 0)
+            mAboutToAutoWrap = (mCursorCol == mRightMargin - advance);
+
+        mCursorCol = Math.min(mCursorCol + advance, mRightMargin - 1);
     }
 
-    /** Format a color as the 16 bit per channel text used in xterm color reports. */
     /** The number that OSC 4 gives to the first special color, the ones before it are the indexed colors. */
     private static final int SPECIAL_COLOR_OFFSET = 256;
 
@@ -3943,6 +3972,7 @@ public final class TerminalEmulator {
         }
     }
 
+    /** Format a color as the 16 bit per channel text used in xterm color reports. */
     private static String formatColorReport(int rgb) {
         int r = (65535 * ((rgb >> 16) & 0xFF)) / 255;
         int g = (65535 * ((rgb >> 8) & 0xFF)) / 255;
@@ -3962,7 +3992,6 @@ public final class TerminalEmulator {
         setCursorRow(Math.min(limit, mCursorRow + rows));
     }
 
-    /** Go to the left margin, or to the screen edge when left of the margin and origin mode is off. */
     /**
      * Moves to the next tab stop. In the more fix mode of xterm, DECSET 41, a tab that follows text up to the right
      * edge first wraps to the next line. Curses depends on it when it draws to the end of a row and then tabs.
@@ -3977,6 +4006,7 @@ public final class TerminalEmulator {
         mCursorCol = nextTabStop(1);
     }
 
+    /** Go to the left margin, or to the screen edge when left of the margin and origin mode is off. */
     private void carriageReturn() {
         boolean originMode = isDecsetInternalBitSet(DECSET_BIT_ORIGIN_MODE);
         setCursorCol(originMode || mCursorCol >= mLeftMargin ? mLeftMargin : 0);

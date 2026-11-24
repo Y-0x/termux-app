@@ -834,11 +834,9 @@ public final class TerminalRenderer {
                 drawSixelBitmap(bm, screen.getSixelRect(style), canvas, column, heightOffset);
                 int charIdx = currentCharIndex;
                 if (charIdx < charsUsedInLine) {
-                    char c = line[charIdx++];
-                    int cp = Character.isHighSurrogate(c) && charIdx < charsUsedInLine
-                            ? Character.toCodePoint(c, line[charIdx++]) : c;
-                    int w = Math.max(1, WcWidth.width(cp));
-                    while (charIdx < charsUsedInLine && WcWidth.width(line, charIdx) <= 0) {
+                    int w = Math.max(1, WcWidth.width(line, charIdx, charsUsedInLine));
+                    charIdx += Character.isHighSurrogate(line[charIdx]) && charIdx + 1 < charsUsedInLine ? 2 : 1;
+                    while (charIdx < charsUsedInLine && WcWidth.width(line, charIdx, charsUsedInLine) <= 0) {
                         charIdx += Character.isHighSurrogate(line[charIdx]) ? 2 : 1;
                     }
                     currentCharIndex = charIdx;
@@ -854,13 +852,13 @@ public final class TerminalRenderer {
             final int charsForCodePoint = highSurrogate ? 2 : 1;
             final int codePoint = highSurrogate && currentCharIndex + 1 < charsUsedInLine
                     ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
-            final int codePointWcWidth = WcWidth.width(codePoint);
+            final int codePointWcWidth = WcWidth.width(line, currentCharIndex, charsUsedInLine);
             final boolean insideCursor = (column == cursorX || (codePointWcWidth == 2 && column == cursorX - 1));
             final boolean insideSelection = column >= selx1 && column <= selx2;
 
             int nextCharIndex = currentCharIndex + charsForCodePoint;
             int combiningChars = 0;
-            while (nextCharIndex < charsUsedInLine && WcWidth.width(line, nextCharIndex) <= 0) {
+            while (nextCharIndex < charsUsedInLine && WcWidth.width(line, nextCharIndex, charsUsedInLine) <= 0) {
                 int combLen = Character.isHighSurrogate(line[nextCharIndex]) ? 2 : 1;
                 nextCharIndex += combLen;
                 combiningChars += combLen;
