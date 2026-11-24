@@ -1,7 +1,8 @@
 package com.termux.terminal;
 
 /**
- * Implementation of wcwidth(3) for Unicode 15.
+ * Implementation of wcwidth(3) for Unicode 15.1, with the width of a cell that depends on the characters around it:
+ * a zero width joiner, a pair of regional indicators, a skin tone and U+FE0F change the width of the characters.
  *
  * Implementation from https://github.com/jquast/wcwidth but we return 0 for unprintable characters.
  *
@@ -404,14 +405,14 @@ public final class WcWidth {
         {0x02e80, 0x02e99},  // Cjk Radical Repeat      ..Cjk Radical Rap
         {0x02e9b, 0x02ef3},  // Cjk Radical Choke       ..Cjk Radical C-simplified
         {0x02f00, 0x02fd5},  // Kangxi Radical One      ..Kangxi Radical Flute
-        {0x02ff0, 0x02ffb},  // Ideographic Description ..Ideographic Description
+        {0x02ff0, 0x02fff},  // Ideographic Description ..Ideographic Description
         {0x03000, 0x0303e},  // Ideographic Space       ..Ideographic Variation In
         {0x03041, 0x03096},  // Hiragana Letter Small A ..Hiragana Letter Small Ke
         {0x03099, 0x030ff},  // Combining Katakana-hirag..Katakana Digraph Koto
         {0x03105, 0x0312f},  // Bopomofo Letter B       ..Bopomofo Letter Nn
         {0x03131, 0x0318e},  // Hangul Letter Kiyeok    ..Hangul Letter Araeae
         {0x03190, 0x031e3},  // Ideographic Annotation L..Cjk Stroke Q
-        {0x031f0, 0x0321e},  // Katakana Letter Small Ku..Parenthesized Korean Cha
+        {0x031ef, 0x0321e},  // Ideographic Description ..Parenthesized Korean Cha
         {0x03220, 0x03247},  // Parenthesized Ideograph ..Circled Ideograph Koto
         {0x03250, 0x04dbf},  // Partnership Sign        ..Cjk Unified Ideograph-4d
         {0x04e00, 0x0a48c},  // Cjk Unified Ideograph-4e..Yi Syllable Yyr
@@ -490,7 +491,7 @@ public final class WcWidth {
     };
 
 
-    private static boolean intable(int[][] table, int c) {
+    static boolean intable(int[][] table, int c) {
         // First quick check f|| Latin1 etc. characters.
         if (c < table[0][0]) return false;
 
@@ -510,7 +511,14 @@ public final class WcWidth {
         return false;
     }
 
-    /** Return the terminal display width of a code point: 0, 1 || 2. */
+    private static final int ZERO_WIDTH_JOINER = 0x200D;
+    private static final int VARIATION_SELECTOR_EMOJI = 0xFE0F;
+    private static final int REGIONAL_INDICATOR_FIRST = 0x1F1E6;
+    private static final int REGIONAL_INDICATOR_LAST = 0x1F1FF;
+    private static final int EMOJI_MODIFIER_FIRST = 0x1F3FB;
+    private static final int EMOJI_MODIFIER_LAST = 0x1F3FF;
+
+    /** Return the terminal display width of a code point on its own: 0, 1 || 2. */
     public static int width(int ucs) {
         if (ucs == 0 ||
             ucs == 0x034F ||
@@ -529,13 +537,78 @@ public final class WcWidth {
         // combining characters with zero width
         if (intable(ZERO_WIDTH, ucs)) return 0;
 
+        if (REGIONAL_INDICATOR_FIRST <= ucs && ucs <= REGIONAL_INDICATOR_LAST) return 2;
+
         return intable(WIDE_EASTASIAN, ucs) ? 2 : 1;
     }
 
-    /** The width at an index position in a java char array. */
+    /** The width at an index position in a java char array, see {@link #width(char[], int, int)}. */
     public static int width(char[] chars, int index) {
-        char c = chars[index];
-        return Character.isHighSurrogate(c) ? width(Character.toCodePoint(c, chars[index + 1])) : width(c);
+        return width(chars, index, chars.length);
+    }
+
+    /**
+     * The width of the code point at an index position in a java char array that is valid up to {@code limit}.
+     * The characters around it count, as in a grapheme cluster:
+     * <ul>
+     * <li>A character that follows a zero width joiner and is an emoji joins the cell before it, so it has width 0.</li>
+     * <li>The second regional indicator of a pair, a flag, and a skin tone after an emoji have width 0.</li>
+     * <li>A narrow emoji that is followed by U+FE0F gets width 2.</li>
+     * </ul>
+     */
+    public static int width(char[] chars, int index, int limit) {
+        final int codePoint = codePointAt(chars, index, limit);
+        final int width = width(codePoint);
+        if (width == 0) return 0;
+
+        if (REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST) {
+            int before = 0;
+            for (int i = index; i > 0; ) {
+                final int previous = Character.codePointBefore(chars, i);
+                if (previous < REGIONAL_INDICATOR_FIRST || previous > REGIONAL_INDICATOR_LAST) break;
+                before++;
+                i -= Character.charCount(previous);
+            }
+            return before % 2 == 1 ? 0 : width;
+        }
+        if (EMOJI_MODIFIER_FIRST <= codePoint && codePoint <= EMOJI_MODIFIER_LAST) {
+            return index > 0 && EmojiData.isExtendedPictographic(Character.codePointBefore(chars, index)) ? 0 : width;
+        }
+        if (index > 0 && chars[index - 1] == ZERO_WIDTH_JOINER && EmojiData.isExtendedPictographic(codePoint)) return 0;
+
+        final int next = index + Character.charCount(codePoint);
+        if (width == 1 && next < limit && chars[next] == VARIATION_SELECTOR_EMOJI && EmojiData.isTextStyleEmoji(codePoint)) {
+            return 2;
+        }
+        return width;
+    }
+
+    /** Tells if a code point can have no width in the cell before it, so that only then the cell has to be checked. */
+    public static boolean mayJoinCell(int codePoint) {
+        return (REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST)
+            || (EMOJI_MODIFIER_FIRST <= codePoint && codePoint <= EMOJI_MODIFIER_LAST)
+            || EmojiData.isExtendedPictographic(codePoint);
+    }
+
+    /** Tells if {@code codePoint} turns a narrow cell into a wide one when it is added to the cell. */
+    public static boolean isEmojiVariationSelector(int codePoint) {
+        return codePoint == VARIATION_SELECTOR_EMOJI;
+    }
+
+    /**
+     * Tells if a code point that follows the cell {@code cell} has no width of its own and joins the cell.
+     * This is the same decision that {@link #width(char[], int, int)} makes for a code point in a row.
+     */
+    public static boolean joinsCell(char[] cell, int cellLength, int codePoint) {
+        final char[] chars = new char[cellLength + 2];
+        System.arraycopy(cell, 0, chars, 0, cellLength);
+        final int length = cellLength + Character.toChars(codePoint, chars, cellLength);
+        return width(chars, cellLength, length) <= 0;
+    }
+
+    private static int codePointAt(char[] chars, int index, int limit) {
+        final char c = chars[index];
+        return Character.isHighSurrogate(c) && index + 1 < limit ? Character.toCodePoint(c, chars[index + 1]) : c;
     }
 
     /**
@@ -548,17 +621,8 @@ public final class WcWidth {
 
         int count = 0;
         for (int i = start; i < end && i < chars.length;) {
-            if (Character.isHighSurrogate(chars[i])) {
-                if (width(Character.toCodePoint(chars[i], chars[i + 1])) <= 0) {
-                    count++;
-                }
-                i += 2;
-            } else {
-                if (width(chars[i]) <= 0) {
-                    count++;
-                }
-                i++;
-            }
+            if (width(chars, i, end) <= 0) count++;
+            i += Character.isHighSurrogate(chars[i]) ? 2 : 1;
         }
         return count;
     }

@@ -362,13 +362,18 @@ public final class TerminalBuffer {
                 }
 
                 int currentOldCol = 0;
+                // The columns of the last character that has a width, a combining character goes to its first column.
+                int lastBaseWidth = 1;
                 long styleAtCol = 0;
                 int underlineColorAtCol = 0;
                 for (int i = 0; i < lastNonSpaceIndex; i++) {
                     // Note that looping over java character, not cells.
+                    final int codePointIndex = i;
                     char c = oldLine.mText[i];
                     int codePoint = (Character.isHighSurrogate(c)) ? Character.toCodePoint(c, oldLine.mText[++i]) : c;
-                    int displayWidth = WcWidth.width(codePoint);
+                    int displayWidth = WcWidth.width(oldLine.mText, codePointIndex, oldLine.getSpaceUsed());
+                    // A character of an emoji sequence has a width of its own but none in the cell that it joins.
+                    final boolean joinsCell = displayWidth <= 0 && WcWidth.width(codePoint) > 0;
                     // Use the last style if this is a zero-width character:
                     if (displayWidth > 0) {
                         styleAtCol = oldLine.getStyle(currentOldCol);
@@ -387,9 +392,10 @@ public final class TerminalBuffer {
                         currentOutputExternalColumn = 0;
                     }
 
-                    int offsetDueToCombiningChar = ((displayWidth <= 0 && currentOutputExternalColumn > 0) ? 1 : 0);
-                    int outputColumn = currentOutputExternalColumn - offsetDueToCombiningChar;
-                    setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol, underlineColorAtCol);
+                    int offsetDueToCombiningChar = ((displayWidth <= 0 && currentOutputExternalColumn > 0) ? lastBaseWidth : 0);
+                    int outputColumn = Math.max(0, currentOutputExternalColumn - offsetDueToCombiningChar);
+                    if (joinsCell) appendToCell(outputColumn, currentOutputExternalRow, codePoint, styleAtCol, underlineColorAtCol);
+                    else setChar(outputColumn, currentOutputExternalRow, codePoint, styleAtCol, underlineColorAtCol);
 
                     if (displayWidth > 0) {
                         if (oldCursorRow == externalOldRow && oldCursorColumn == currentOldCol) {
@@ -397,6 +403,7 @@ public final class TerminalBuffer {
                             newCursorRow = currentOutputExternalRow;
                             newCursorPlaced = true;
                         }
+                        lastBaseWidth = displayWidth;
                         currentOldCol += displayWidth;
                         currentOutputExternalColumn += displayWidth;
                         if (justToCursor && newCursorPlaced) break;
@@ -534,10 +541,36 @@ public final class TerminalBuffer {
 
     /** Same as {@link #setChar(int, int, int, long)} with the underline color as ARGB, 0 for the foreground color. */
     public void setChar(int column, int row, int codePoint, long style, int underlineColor) {
+        setChar(column, row, codePoint, style, underlineColor, false);
+    }
+
+    /** Same as {@link TerminalRow#appendToCell(int, int, long, int)}, the cell is at {@code column} of {@code row}. */
+    public void appendToCell(int column, int row, int codePoint, long style, int underlineColor) {
+        setChar(column, row, codePoint, style, underlineColor, true);
+    }
+
+    private void setChar(int column, int row, int codePoint, long style, int underlineColor, boolean joinsCell) {
         if (row  < 0 || row >= mScreenRows || column < 0 || column >= mColumns)
             throw new IllegalArgumentException("TerminalBuffer.setChar(): row=" + row + ", column=" + column + ", mScreenRows=" + mScreenRows + ", mColumns=" + mColumns);
         row = externalToInternalRow(row);
-        allocateFullLineIfNecessary(row).setChar(column, codePoint, style, underlineColor);
+        final TerminalRow line = allocateFullLineIfNecessary(row);
+        if (joinsCell) line.appendToCell(column, codePoint, style, underlineColor);
+        else line.setChar(column, codePoint, style, underlineColor);
+    }
+
+    /** See {@link TerminalRow#cellJoins(int, int)}. */
+    public boolean cellJoins(int column, int row, int codePoint) {
+        return allocateFullLineIfNecessary(externalToInternalRow(row)).cellJoins(column, codePoint);
+    }
+
+    /** See {@link TerminalRow#cellWidth(int)}. */
+    public int cellWidth(int column, int row) {
+        return allocateFullLineIfNecessary(externalToInternalRow(row)).cellWidth(column);
+    }
+
+    /** See {@link TerminalRow#cellWidthWith(int, int)}. */
+    public int cellWidthWith(int column, int row, int codePoint) {
+        return allocateFullLineIfNecessary(externalToInternalRow(row)).cellWidthWith(column, codePoint);
     }
 
     public long getStyleAt(int externalRow, int column) {

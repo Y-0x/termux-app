@@ -39,6 +39,8 @@ public final class TerminalRow {
      */
     private static final int MAX_COMBINING_CHARACTERS_PER_COLUMN = 15;
 
+    private static final int VARIATION_SELECTOR_EMOJI = 0xFE0F;
+
     /** The number of columns in this terminal row. */
     private final int mColumns;
     /** The text filling this terminal row. */
@@ -105,22 +107,32 @@ public final class TerminalRow {
         final int[] sourceUnderlineColors = (this == line && mUnderlineSlotColors != null)
             ? Arrays.copyOf(mUnderlineSlotColors, mUnderlineSlotColors.length) : line.mUnderlineSlotColors;
         int latestNonCombiningWidth = 0;
+        final int sourceLimit = line.mSpaceUsed;
         for (int i = x1; i < x2; i++) {
+            final int codePointIndex = i;
             char sourceChar = sourceChars[i];
             int codePoint = Character.isHighSurrogate(sourceChar) ? Character.toCodePoint(sourceChar, sourceChars[++i]) : sourceChar;
+            int w;
+            boolean joinsCell = false;
             if (startingFromSecondHalfOfWideChar) {
                 // Just treat copying second half of wide char as copying whitespace.
                 codePoint = ' ';
                 startingFromSecondHalfOfWideChar = false;
+                w = 1;
+            } else {
+                w = WcWidth.width(sourceChars, codePointIndex, sourceLimit);
+                // A character of an emoji sequence has a width of its own but none in the cell that it joins.
+                joinsCell = w <= 0 && WcWidth.width(codePoint) > 0;
             }
-            int w = WcWidth.width(codePoint);
             if (w > 0) {
                 destinationX += latestNonCombiningWidth;
                 sourceX1 += latestNonCombiningWidth;
                 latestNonCombiningWidth = w;
             }
             final long sourceStyle = sourceStyles[sourceX1];
-            setChar(destinationX, codePoint, sourceStyle, underlineColorOf(sourceUnderlineColors, sourceStyle));
+            final int sourceUnderlineColor = underlineColorOf(sourceUnderlineColors, sourceStyle);
+            if (joinsCell) appendToCell(destinationX, codePoint, sourceStyle, sourceUnderlineColor);
+            else setChar(destinationX, codePoint, sourceStyle, sourceUnderlineColor);
         }
     }
 
@@ -138,24 +150,15 @@ public final class TerminalRow {
             int newCharIndex = currentCharIndex;
             char c = mText[newCharIndex++]; // cci=1, cci=2
             boolean isHigh = Character.isHighSurrogate(c);
-            int codePoint = isHigh ? Character.toCodePoint(c, mText[newCharIndex++]) : c;
-            int wcwidth = WcWidth.width(codePoint); // 1, 2
+            if (isHigh) newCharIndex++;
+            int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed); // 1, 2
             if (wcwidth > 0) {
                 currentColumn += wcwidth;
                 if (currentColumn == column) {
                     while (newCharIndex < mSpaceUsed) {
                         // Skip combining chars.
-                        if (Character.isHighSurrogate(mText[newCharIndex])) {
-                            if (WcWidth.width(Character.toCodePoint(mText[newCharIndex], mText[newCharIndex + 1])) <= 0) {
-                                newCharIndex += 2;
-                            } else {
-                                break;
-                            }
-                        } else if (WcWidth.width(mText[newCharIndex]) <= 0) {
-                            newCharIndex++;
-                        } else {
-                            break;
-                        }
+                        if (WcWidth.width(mText, newCharIndex, mSpaceUsed) > 0) break;
+                        newCharIndex += Character.isHighSurrogate(mText[newCharIndex]) ? 2 : 1;
                     }
                     return newCharIndex;
                 } else if (currentColumn > column) {
@@ -167,11 +170,40 @@ public final class TerminalRow {
         }
     }
 
+    /** The characters of the cell that covers the column, a wide cell is found from both of its columns. */
+    private char[] cellChars(int column) {
+        if (!mHasNonOneWidthOrSurrogateChars) return new char[] {mText[column]};
+        if (column > 0 && wideDisplayCharacterStartingAt(column - 1)) column--;
+        final int start = findStartOfColumn(column);
+        final int width = WcWidth.width(mText, start, mSpaceUsed);
+        final int end = column + width < mColumns ? findStartOfColumn(column + width) : mSpaceUsed;
+        return Arrays.copyOfRange(mText, start, end);
+    }
+
+    /** Tells if {@code codePoint} would join the cell at the column, see {@link WcWidth#joinsCell(char[], int, int)}. */
+    public boolean cellJoins(int column, int codePoint) {
+        final char[] cell = cellChars(column);
+        return WcWidth.joinsCell(cell, cell.length, codePoint);
+    }
+
+    /** The width of the cell at the column. */
+    public int cellWidth(int column) {
+        final char[] cell = cellChars(column);
+        return WcWidth.width(cell, 0, cell.length);
+    }
+
+    /** The width that the cell at the column would have after {@code codePoint} was added to it. */
+    public int cellWidthWith(int column, int codePoint) {
+        final char[] cell = cellChars(column);
+        final char[] grown = Arrays.copyOf(cell, cell.length + Character.charCount(codePoint));
+        Character.toChars(codePoint, grown, cell.length);
+        return WcWidth.width(grown, 0, grown.length);
+    }
+
     public boolean wideDisplayCharacterStartingAt(int column) {
         for (int currentCharIndex = 0, currentColumn = 0; currentCharIndex < mSpaceUsed; ) {
-            char c = mText[currentCharIndex++];
-            int codePoint = Character.isHighSurrogate(c) ? Character.toCodePoint(c, mText[currentCharIndex++]) : c;
-            int wcwidth = WcWidth.width(codePoint);
+            final int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed);
+            currentCharIndex += Character.isHighSurrogate(mText[currentCharIndex]) ? 2 : 1;
             if (wcwidth > 0) {
                 if (currentColumn == column && wcwidth == 2) return true;
                 currentColumn += wcwidth;
@@ -193,8 +225,20 @@ public final class TerminalRow {
         mLineWrap = false;
     }
 
-    // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
     public void setChar(int columnToSet, int codePoint, long style) {
+        setChar(columnToSet, codePoint, style, false);
+    }
+
+    /**
+     * Adds a character that has a width of its own to the cell before it, like the emoji that a zero width joiner
+     * connects to the emoji before. The cell then has more characters but keeps its width, only U+FE0F can make it wider.
+     */
+    public void appendToCell(int columnToSet, int codePoint, long style) {
+        setChar(columnToSet, codePoint, style, true);
+    }
+
+    // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
+    private void setChar(int columnToSet, int codePoint, long style, boolean joinsCell) {
         if (columnToSet  < 0 || columnToSet >= mStyle.length)
             throw new IllegalArgumentException("TerminalRow.setChar(): columnToSet=" + columnToSet + ", codePoint=" + codePoint + ", style=" + style);
 
@@ -208,7 +252,8 @@ public final class TerminalRow {
             mMayContainRtlOrBidi = true;
         }
 
-        final int newCodePointDisplayWidth = WcWidth.width(codePoint);
+        // A character that joins a cell counts like a combining character.
+        final int newCodePointDisplayWidth = joinsCell ? 0 : WcWidth.width(codePoint);
 
         // Fast path when we don't have any chars with width != 1
         if (!mHasNonOneWidthOrSurrogateChars) {
@@ -237,7 +282,7 @@ public final class TerminalRow {
 
         char[] text = mText;
         final int oldStartOfColumnIndex = findStartOfColumn(columnToSet);
-        final int oldCodePointDisplayWidth = WcWidth.width(text, oldStartOfColumnIndex);
+        final int oldCodePointDisplayWidth = WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed);
 
         // Get the number of elements in the mText array this column uses now
         int oldCharactersUsedForColumn;
@@ -247,6 +292,13 @@ public final class TerminalRow {
         } else {
             // Last character.
             oldCharactersUsedForColumn = mSpaceUsed - oldStartOfColumnIndex;
+        }
+
+        // U+FE0F makes a narrow emoji wide, which needs the next column. In the last column the cell stays as it is.
+        if (newIsCombining && codePoint == VARIATION_SELECTOR_EMOJI && oldCodePointDisplayWidth == 1
+            && columnToSet == mColumns - 1) {
+            final int base = Character.codePointAt(text, oldStartOfColumnIndex);
+            if (EmojiData.isTextStyleEmoji(base)) return;
         }
 
         // If MAX_COMBINING_CHARACTERS_PER_COLUMN already exist in column, then ignore adding additional combining characters.
@@ -291,7 +343,11 @@ public final class TerminalRow {
         //noinspection ResultOfMethodCallIgnored - since we already now how many java chars is used.
         Character.toChars(codePoint, text, oldStartOfColumnIndex + (newIsCombining ? oldCharactersUsedForColumn : 0));
 
-        if (oldCodePointDisplayWidth == 2 && newCodePointDisplayWidth == 1) {
+        // A combining character can change the width of the cell, which only U+FE0F does.
+        final int newCellDisplayWidth = newIsCombining
+            ? WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed) : newCodePointDisplayWidth;
+
+        if (oldCodePointDisplayWidth == 2 && newCellDisplayWidth == 1) {
             // Replace second half of wide char with a space. Which mean that we actually add a ' ' java character.
             if (mSpaceUsed + 1 > text.length) {
                 char[] newText = new char[text.length + mColumns];
@@ -304,7 +360,7 @@ public final class TerminalRow {
             text[newNextColumnIndex] = ' ';
 
             ++mSpaceUsed;
-        } else if (oldCodePointDisplayWidth == 1 && newCodePointDisplayWidth == 2) {
+        } else if (oldCodePointDisplayWidth == 1 && newCellDisplayWidth == 2) {
             if (columnToSet == mColumns - 1) {
                 throw new IllegalArgumentException("Cannot put wide character in last column");
             } else if (columnToSet == mColumns - 2) {
@@ -338,9 +394,18 @@ public final class TerminalRow {
      * style, 0 means the foreground color. The slot bits of {@code style} are replaced.
      */
     public void setChar(int columnToSet, int codePoint, long style, int underlineColor) {
+        setChar(columnToSet, codePoint, styleWithUnderlineColor(style, underlineColor));
+    }
+
+    /** Same as {@link #appendToCell(int, int, long)}, with the underline color as in {@link #setChar(int, int, long, int)}. */
+    public void appendToCell(int columnToSet, int codePoint, long style, int underlineColor) {
+        appendToCell(columnToSet, codePoint, styleWithUnderlineColor(style, underlineColor));
+    }
+
+    private long styleWithUnderlineColor(long style, int underlineColor) {
         style &= ~UNDERLINE_SLOT_BITS;
         if (underlineColor != 0) style |= (long) slotForUnderlineColor(underlineColor) << TextStyle.UNDERLINE_SLOT_SHIFT;
-        setChar(columnToSet, codePoint, style);
+        return style;
     }
 
     /** Finds the slot of a color, or takes a free one. */
