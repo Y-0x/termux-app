@@ -38,6 +38,7 @@ public final class WcWidth {
     }
 
     private static final int ZERO_WIDTH_JOINER = 0x200D;
+    private static final int VARIATION_SELECTOR_TEXT = 0xFE0E;
     private static final int VARIATION_SELECTOR_EMOJI = 0xFE0F;
     private static final int REGIONAL_INDICATOR_FIRST = 0x1F1E6;
     private static final int REGIONAL_INDICATOR_LAST = 0x1F1FF;
@@ -79,7 +80,7 @@ public final class WcWidth {
      * <ul>
      * <li>A character that follows a zero width joiner and is an emoji joins the cell before it, so it has width 0.</li>
      * <li>The second regional indicator of a pair, a flag, and a skin tone after an emoji have width 0.</li>
-     * <li>A narrow emoji that is followed by U+FE0F gets width 2.</li>
+     * <li>A narrow emoji that is followed by U+FE0F gets width 2, a wide one that is followed by U+FE0E gets width 1.</li>
      * </ul>
      */
     public static int width(char[] chars, int index, int limit) {
@@ -103,8 +104,9 @@ public final class WcWidth {
         if (index > 0 && chars[index - 1] == ZERO_WIDTH_JOINER && isExtendedPictographic(codePoint)) return 0;
 
         final int next = index + Character.charCount(codePoint);
-        if (width == 1 && next < limit && chars[next] == VARIATION_SELECTOR_EMOJI && isTextStyleEmoji(codePoint)) {
-            return 2;
+        if (next < limit && hasEmojiVariation(codePoint)) {
+            if (width == 1 && chars[next] == VARIATION_SELECTOR_EMOJI) return 2;
+            if (width == 2 && chars[next] == VARIATION_SELECTOR_TEXT) return 1;
         }
         return width;
     }
@@ -113,9 +115,9 @@ public final class WcWidth {
         return intable(UnicodeTables.EXTENDED_PICTOGRAPHIC, codePoint);
     }
 
-    /** Tells if a code point is an emoji that looks like text until U+FE0F follows it. */
-    static boolean isTextStyleEmoji(int codePoint) {
-        return intable(UnicodeTables.TEXT_STYLE_EMOJI, codePoint);
+    /** Tells if a code point has an emoji and a text variation sequence, so that U+FE0F and U+FE0E change its look. */
+    static boolean hasEmojiVariation(int codePoint) {
+        return intable(UnicodeTables.EMOJI_VARIATION_BASES, codePoint);
     }
 
     /** Tells if a code point can have no width in the cell before it, so that only then the cell has to be checked. */
@@ -125,9 +127,9 @@ public final class WcWidth {
             || isExtendedPictographic(codePoint);
     }
 
-    /** Tells if {@code codePoint} turns a narrow cell into a wide one when it is added to the cell. */
-    public static boolean isEmojiVariationSelector(int codePoint) {
-        return codePoint == VARIATION_SELECTOR_EMOJI;
+    /** Tells if {@code codePoint} can change the width of the cell that it is added to. */
+    public static boolean isVariationSelector(int codePoint) {
+        return codePoint == VARIATION_SELECTOR_EMOJI || codePoint == VARIATION_SELECTOR_TEXT;
     }
 
     /**

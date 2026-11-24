@@ -8,7 +8,8 @@ character from these tables, so a new Unicode version needs no hand edit.
 | --- | --- |
 | `EastAsianWidth.txt` | wide and fullwidth characters, 2 columns |
 | `extracted/DerivedGeneralCategory.txt` | nonspacing and enclosing marks, 0 columns |
-| `emoji/emoji-data.txt` | `Extended_Pictographic` for emoji sequences, `Emoji` and `Emoji_Presentation` for U+FE0F |
+| `emoji/emoji-data.txt` | `Extended_Pictographic`, the emoji that a zero width joiner can connect |
+| `emoji/emoji-variation-sequences.txt` | the characters that U+FE0F makes wide and U+FE0E makes narrow |
 
 ## Use
 
@@ -21,7 +22,10 @@ python3 tools/unicode/generate_unicode.py --source-dir DIR # files from a folder
 python3 tools/unicode/generate_unicode.py --check          # exit code 1 when the Java file is out of date
 ```
 
-Downloaded files are kept in `tools/unicode/.cache`, which `tools/unicode/.gitignore` ignores. `--refresh` downloads them again.
+The files of `latest` are downloaded on every run, because they change with every release. The files of a fixed
+version are kept in `tools/unicode/.cache`, which `tools/unicode/.gitignore` ignores, and `--refresh` downloads them
+again. `--offline` uses only the cached files. The four files must have the same Unicode version, the tool stops if
+they do not, so that the tables never mix two versions.
 
 ## Run it with the build
 

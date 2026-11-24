@@ -16,7 +16,8 @@ The files that are read:
 
     EastAsianWidth.txt                 wide and fullwidth characters
     extracted/DerivedGeneralCategory.txt   nonspacing and enclosing marks, which have no width
-    emoji/emoji-data.txt               Extended_Pictographic, Emoji and Emoji_Presentation
+    emoji/emoji-data.txt               Extended_Pictographic
+    emoji/emoji-variation-sequences.txt   characters that U+FE0E and U+FE0F can change
 """
 
 import argparse
@@ -41,6 +42,7 @@ FILES = {
     "east_asian_width": "EastAsianWidth.txt",
     "general_category": "extracted/DerivedGeneralCategory.txt",
     "emoji": "emoji/emoji-data.txt",
+    "emoji_variation": "emoji/emoji-variation-sequences.txt",
 }
 
 DOWNLOAD_ATTEMPTS = 3
@@ -48,7 +50,14 @@ DOWNLOAD_TIMEOUT_SECONDS = 30
 MAX_CODE_POINT = 0x10FFFF
 
 LINE_PATTERN = re.compile(r"^\s*([0-9A-Fa-f]{4,6})(?:\.\.([0-9A-Fa-f]{4,6}))?\s*;\s*([A-Za-z_]+)")
-VERSION_PATTERN = re.compile(r"^#\s*[A-Za-z]+(?:-[A-Za-z]+)*-(\d+\.\d+\.\d+)\.txt")
+# A line of emoji-variation-sequences.txt, for example "0023 FE0F  ; emoji style;  # (1.1) NUMBER SIGN".
+VARIATION_PATTERN = re.compile(r"^\s*([0-9A-Fa-f]{4,6})\s+(FE0E|FE0F)\s*;\s*(text|emoji) style")
+# The version is in the header, either as "# Version: 18.0.0" or in the file name "# EastAsianWidth-18.0.0.txt".
+VERSION_PATTERNS = (
+    re.compile(r"^#\s*Version:\s*(\d+(?:\.\d+){1,2})\s*$"),
+    re.compile(r"^#\s*[A-Za-z]+(?:-[A-Za-z]+)*-(\d+(?:\.\d+){1,2})\.txt\s*$"),
+)
+HEADER_LINES = 30
 
 
 def source_url(version, key):
@@ -88,7 +97,9 @@ def fetch_sources(args):
                 path = os.path.join(args.source_dir, os.path.basename(relative))
         else:
             path = os.path.join(args.cache_dir, args.version, relative)
-            if args.refresh or not os.path.isfile(path):
+            # The files of "latest" change with every release, so they are never taken from the cache unless asked.
+            stale = args.refresh or args.version == "latest"
+            if not args.offline and (stale or not os.path.isfile(path)):
                 download(source_url(args.version, key), path)
         if not os.path.isfile(path):
             sys.exit("missing source file %s" % path)
@@ -98,12 +109,23 @@ def fetch_sources(args):
 
 
 def file_version(text, name):
-    """The Unicode version from the first comment line, for example '# EastAsianWidth-15.1.0.txt'."""
-    for line in text.splitlines()[:5]:
-        match = VERSION_PATTERN.match(line)
-        if match:
-            return match.group(1)
+    """The Unicode version from the header of a file, as a tuple like (18, 0, 0)."""
+    for line in text.splitlines()[:HEADER_LINES]:
+        for pattern in VERSION_PATTERNS:
+            match = pattern.match(line)
+            if match:
+                parts = [int(part) for part in match.group(1).split(".")]
+                return tuple(parts + [0] * (3 - len(parts)))
     sys.exit("cannot read the version of %s, the header format changed" % name)
+
+
+def common_version(texts):
+    """The Unicode version of all files, they must agree, or the tables would mix two versions."""
+    versions = {key: file_version(text, FILES[key]) for key, text in texts.items()}
+    if len(set(versions.values())) != 1:
+        sys.exit("the Unicode data files have different versions: %s" % ", ".join(
+            "%s %s" % (FILES[key], ".".join(map(str, version))) for key, version in sorted(versions.items())))
+    return ".".join(map(str, next(iter(versions.values()))))
 
 
 def parse_ranges(text, wanted):
@@ -119,6 +141,19 @@ def parse_ranges(text, wanted):
             sys.exit("bad range in line: %s" % line)
         result[match.group(3)].append((first, last))
     return result
+
+
+def parse_variation_bases(text):
+    """The characters that have an emoji style and a text style sequence."""
+    emoji_style, text_style = set(), set()
+    for line in text.splitlines():
+        match = VARIATION_PATTERN.match(line)
+        if match:
+            (emoji_style if match.group(3) == "emoji" else text_style).add(int(match.group(1), 16))
+    # Every character with one style has the other one too, a difference means that the file is not read right.
+    if emoji_style != text_style:
+        sys.exit("the variation sequences have different characters for the emoji and the text style")
+    return [(code_point, code_point) for code_point in emoji_style]
 
 
 def merge(ranges):
@@ -139,39 +174,16 @@ def contains(ranges, code_point):
 def build_tables(texts):
     widths = parse_ranges(texts["east_asian_width"], ("W", "F"))
     categories = parse_ranges(texts["general_category"], ("Mn", "Me"))
-    emoji = parse_ranges(texts["emoji"], ("Emoji", "Emoji_Presentation", "Extended_Pictographic"))
-
-    emoji_presentation = merge(emoji["Emoji_Presentation"])
-    # Emoji that look like text by default and become emoji with U+FE0F.
-    text_style = merge(subtract(emoji["Emoji"], emoji_presentation))
+    emoji = parse_ranges(texts["emoji"], ("Extended_Pictographic",))
 
     tables = {
         "ZERO_WIDTH": merge(categories["Mn"] + categories["Me"]),
         "WIDE": merge(widths["W"] + widths["F"]),
         "EXTENDED_PICTOGRAPHIC": merge(emoji["Extended_Pictographic"]),
-        "TEXT_STYLE_EMOJI": text_style,
+        "EMOJI_VARIATION_BASES": merge(parse_variation_bases(texts["emoji_variation"])),
     }
     check_tables(tables)
     return tables
-
-
-def subtract(ranges, removed):
-    """The code points of ranges that are not in removed."""
-    remaining = []
-    removed = merge(removed)
-    for first, last in merge(ranges):
-        start = first
-        for r_first, r_last in removed:
-            if r_last < start or r_first > last:
-                continue
-            if r_first > start:
-                remaining.append((start, r_first - 1))
-            start = r_last + 1
-            if start > last:
-                break
-        if start <= last:
-            remaining.append((start, last))
-    return remaining
 
 
 def check_tables(tables):
@@ -180,7 +192,8 @@ def check_tables(tables):
         ("ZERO_WIDTH", 0x0301, True), ("ZERO_WIDTH", 0x0041, False),
         ("WIDE", 0x4E00, True), ("WIDE", 0x0041, False), ("WIDE", 0x1F600, True),
         ("EXTENDED_PICTOGRAPHIC", 0x1F600, True), ("EXTENDED_PICTOGRAPHIC", 0x0041, False),
-        ("TEXT_STYLE_EMOJI", 0x263A, True), ("TEXT_STYLE_EMOJI", 0x1F600, False),
+        ("EMOJI_VARIATION_BASES", 0x263A, True), ("EMOJI_VARIATION_BASES", 0x0041, False),
+        ("EMOJI_VARIATION_BASES", 0x1F600, False),
     ]
     for name, code_point, expected in facts:
         if contains(tables[name], code_point) != expected:
@@ -189,11 +202,17 @@ def check_tables(tables):
     for name, ranges in tables.items():
         if not ranges:
             sys.exit("table %s is empty" % name)
+        previous_last = -2
+        for first, last in ranges:
+            # The binary search in the emulator needs sorted ranges that do not touch each other.
+            if not 0 <= first <= last <= MAX_CODE_POINT or first <= previous_last + 1:
+                sys.exit("table %s has a bad or overlapping range U+%04X..U+%04X" % (name, first, last))
+            previous_last = last
 
 
 JAVA_TEMPLATE = """\
 // This file is generated by tools/unicode/generate_unicode.py, do not edit it.
-// Unicode data: EastAsianWidth %(east_asian_width)s, DerivedGeneralCategory %(general_category)s, emoji-data %(emoji)s.
+// Unicode data: version %(version)s of EastAsianWidth, DerivedGeneralCategory, emoji-data and emoji-variation-sequences.
 package com.termux.terminal;
 
 /** The Unicode range tables that the width of a character depends on. */
@@ -221,23 +240,36 @@ final class UnicodeTables {
     };
 
     /**
-     * Emoji that are drawn like text by default, so that U+FE0F makes them wide. These are the characters with the
-     * Emoji property but without the Emoji_Presentation property.
+     * Characters with an emoji and a text style variation sequence. U+FE0F makes a narrow one wide and U+FE0E makes a
+     * wide one narrow.
      */
-    static final int[][] TEXT_STYLE_EMOJI = {
-%(TEXT_STYLE_EMOJI)s
+    static final int[][] EMOJI_VARIATION_BASES = {
+%(EMOJI_VARIATION_BASES)s
     };
 
 }
 """
 
 
-def render_java(tables, versions):
-    values = dict(versions)
-    values["version"] = max(versions.values(), key=lambda v: tuple(int(p) for p in v.split(".")))
+def render_java(tables, version):
+    values = {"version": version}
     for name, ranges in tables.items():
         values[name] = "\n".join("        {0x%05x, 0x%05x}," % (first, last) for first, last in ranges)
     return JAVA_TEMPLATE % values
+
+
+def write_atomically(path, text):
+    """Writes through a temporary file, so that a failure never leaves a half written Java file."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    handle, temporary = tempfile.mkstemp(dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        os.unlink(temporary)
+        raise
 
 
 def main():
@@ -246,13 +278,14 @@ def main():
     parser.add_argument("--source-dir", help="read the data files from this directory instead of the network")
     parser.add_argument("--cache-dir", default=DEFAULT_CACHE, help="where downloaded files are kept")
     parser.add_argument("--refresh", action="store_true", help="download the files again even if they are cached")
+    parser.add_argument("--offline", action="store_true", help="use only the cached files, no download")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="the Java file to write")
     parser.add_argument("--check", action="store_true", help="do not write, fail if the Java file differs")
     args = parser.parse_args()
 
     texts = fetch_sources(args)
-    versions = {key: file_version(text, FILES[key]) for key, text in texts.items()}
-    source = render_java(build_tables(texts), versions)
+    version = common_version(texts)
+    source = render_java(build_tables(texts), version)
 
     if args.check:
         current = open(args.output, encoding="utf-8").read() if os.path.isfile(args.output) else ""
@@ -260,9 +293,8 @@ def main():
             sys.exit("%s is out of date, run tools/unicode/generate_unicode.py" % args.output)
         print("up to date")
         return
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(source)
-    print("wrote %s, Unicode %s" % (args.output, ", ".join("%s %s" % kv for kv in sorted(versions.items()))))
+    write_atomically(args.output, source)
+    print("wrote %s, Unicode %s" % (args.output, version))
 
 
 if __name__ == "__main__":
