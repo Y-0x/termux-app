@@ -3909,9 +3909,9 @@ public final class TerminalEmulator {
         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
         if (column < 0) column = 0;
 
-        // U+FE0F makes a narrow emoji wide, so the cell takes one more column, and the cursor has to follow it.
+        // U+FE0F makes a narrow emoji wide and U+FE0E makes a wide one narrow, and the cursor has to follow the cell.
         int widerBy = 0;
-        if (displayWidth <= 0 && WcWidth.isEmojiVariationSelector(codePoint)) {
+        if (displayWidth <= 0 && WcWidth.isVariationSelector(codePoint)) {
             widerBy = mScreen.cellWidthWith(column, mCursorRow, codePoint) - mScreen.cellWidth(column, mCursorRow);
             // Without a column left of the right margin the cell stays narrow.
             if (widerBy > 0 && column + mScreen.cellWidth(column, mCursorRow) + widerBy > mRightMargin) return;
@@ -3927,7 +3927,14 @@ public final class TerminalEmulator {
         if (joinsCell) mScreen.appendToCell(column, mCursorRow, codePoint, getStyle(), currentUnderlineColor());
         else mScreen.setChar(column, mCursorRow, codePoint, getStyle(), currentUnderlineColor());
 
-        final int advance = displayWidth > 0 ? displayWidth : Math.max(widerBy, 0);
+        if (widerBy < 0) {
+            // The cell got narrower. After a wide cell at the right margin the cursor already is in the last column.
+            if (mAboutToAutoWrap) mAboutToAutoWrap = false;
+            else mCursorCol += widerBy;
+            return;
+        }
+
+        final int advance = displayWidth > 0 ? displayWidth : widerBy;
         if (autoWrap && advance > 0)
             mAboutToAutoWrap = (mCursorCol == mRightMargin - advance);
 

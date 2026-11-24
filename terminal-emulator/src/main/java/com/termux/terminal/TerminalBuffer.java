@@ -380,8 +380,10 @@ public final class TerminalBuffer {
                         underlineColorAtCol = oldLine.getUnderlineColor(styleAtCol);
                     }
 
-                    // Line wrap as necessary:
-                    if (currentOutputExternalColumn + displayWidth > mColumns) {
+                    // Line wrap as necessary. A wide character that U+FE0E makes narrow is written wide first, so it
+                    // needs the room of a wide character.
+                    final int widthToFit = displayWidth > 0 ? Math.max(displayWidth, WcWidth.width(codePoint)) : 0;
+                    if (currentOutputExternalColumn + widthToFit > mColumns) {
                         setLineWrap(currentOutputExternalRow);
                         if (currentOutputExternalRow == mScreenRows - 1) {
                             if (newCursorPlaced) newCursorRow--;
