@@ -27,6 +27,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Generate Unicode tables
+        shell: bash
+        run: python3 tools/unicode/generate_unicode.py
+
       - name: Build APKs
         shell: bash {0}
         env:
