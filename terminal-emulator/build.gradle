@@ -1,6 +1,20 @@
 apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
 
+// UnicodeTables.java is not stored in git. Generate it when missing, or on demand with -PupdateUnicode.
+def unicodeTables = file('src/main/java/com/termux/terminal/UnicodeTables.java')
+if (!unicodeTables.exists() || project.hasProperty('updateUnicode')) {
+    def generator = new ProcessBuilder('python3', 'tools/unicode/generate_unicode.py')
+            .directory(rootProject.projectDir)
+            .redirectErrorStream(true)
+            .start()
+    generator.inputStream.eachLine { line -> logger.lifecycle(line) }
+    if (generator.waitFor() != 0 || !unicodeTables.exists()) {
+        throw new GradleException('Cannot generate UnicodeTables.java, python3 and access to unicode.org are needed. ' +
+                'Run python3 tools/unicode/generate_unicode.py by hand.')
+    }
+}
+
 android {
     namespace "com.termux.emulator"
 
