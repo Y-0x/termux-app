@@ -29,22 +29,12 @@ they do not, so that the tables never mix two versions.
 
 ## Run it with the build
 
-Network access in a normal build is not wanted, F-Droid style builds forbid it, so the generated file is committed and
-the tool is run by hand or by a CI job with `--check`. A Gradle task for a local build that always uses the newest data,
-for `terminal-emulator/build.gradle`:
+`UnicodeTables.java` is not stored in git, `.gitignore` ignores it. Every build has to make it first.
 
-```groovy
-tasks.register('generateUnicodeTables', Exec) {
-    workingDir rootProject.projectDir
-    commandLine 'python3', 'tools/unicode/generate_unicode.py'
-}
-
-if (project.hasProperty('updateUnicode')) {
-    preBuild.dependsOn generateUnicodeTables
-}
-```
-
-Then `./gradlew assembleDebug -PupdateUnicode` fetches the newest data before it compiles.
+* The GitHub workflows run `python3 tools/unicode/generate_unicode.py` before gradle.
+* On a development machine run the same command once after a clone, and again to get a newer Unicode version.
+* Builds that cannot run python or reach unicode.org, like a JitPack build, need the generated file made before
+  they start, or the generator run in their own setup step.
 
 ## When the format of a data file changes
 

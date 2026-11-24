@@ -37,3 +37,5 @@ local.properties
 .swp
 ehthumbs.db
 Thumbs.db
+# Made by tools/unicode/generate_unicode.py before every build.
+terminal-emulator/src/main/java/com/termux/terminal/UnicodeTables.java
