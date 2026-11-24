@@ -404,15 +404,24 @@ public final class TerminalEmulator {
     /** The argument of the last DECSACE, 0 and 1 are a stream of characters and 2 is a rectangle. */
     private int mAttributeChangeExtent;
 
+    /** The columns of DECCOLM when it is reset and when it is set. */
+    private static final int COLUMNS_IN_NARROW_MODE = 80;
     private static final int COLUMNS_IN_WIDE_MODE = 132;
 
-    /** DECSET 40. The 132 column mode DECCOLM only works while this is set. */
+    /** No DECCOLM was done yet, the terminal has the columns of the view. */
+    private static final int COLUMN_MODE_VIEW = 0;
+    /** DECCOLM was reset, the terminal has 80 columns, or all columns of the view when the view is narrower. */
+    private static final int COLUMN_MODE_NARROW = 1;
+    /** DECCOLM was set, the terminal has 132 columns. */
+    private static final int COLUMN_MODE_WIDE = 2;
+
+    /** DECSET 40. DECCOLM only works while this is set. */
     private boolean mAllow80To132;
 
-    /** DECSET 3, DECCOLM. The terminal has 132 columns instead of the columns of the view. */
-    private boolean mColumnMode132;
+    /** The column mode that DECCOLM chose, one of the COLUMN_MODE constants. */
+    private int mColumnMode = COLUMN_MODE_VIEW;
 
-    /** The columns that the view has, the size that the terminal gets in the 80 column mode. */
+    /** The columns that the view has. */
     private int mViewColumns;
 
     /** The values of the DEC private modes that were saved with "CSI ? Pm s", true is set. */
@@ -712,16 +721,16 @@ public final class TerminalEmulator {
         }
     }
 
-    /** Switches between the 132 columns of DECCOLM and the columns of the view and tells the client about the new size. */
-    private void setColumnMode(boolean wide) {
-        if (mColumnMode132 == wide) return;
-        mColumnMode132 = wide;
+    /** Switches the terminal to the columns of a column mode and tells the client about the new size. */
+    private void setColumnMode(int columnMode) {
+        if (mColumnMode == columnMode) return;
+        mColumnMode = columnMode;
         resizeTo(effectiveColumns(mViewColumns), mRows);
         mSession.onEmulatorResized(mColumns, mRows, mCellWidthPixels, mCellHeightPixels);
     }
 
     /**
-     * Resizes to the size of the view. While the 132 column mode DECCOLM is set the terminal keeps its 132 columns,
+     * Resizes to the size of the view. While DECCOLM chose a column mode the terminal keeps its columns,
      * so only the rows follow the view. Use {@link #effectiveColumns(int)} for the size of the pty.
      */
     public void resize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
@@ -731,9 +740,16 @@ public final class TerminalEmulator {
         resizeTo(effectiveColumns(columns), rows);
     }
 
-    /** The columns that the terminal has when the view has {@code viewColumns}, it is 132 in the 132 column mode. */
+    /**
+     * The columns that the terminal has when the view has {@code viewColumns}. The wide mode has 132 columns and the
+     * narrow mode has 80, but never more than the view, so that a small screen does not cut the text.
+     */
     public int effectiveColumns(int viewColumns) {
-        return mColumnMode132 ? COLUMNS_IN_WIDE_MODE : viewColumns;
+        switch (mColumnMode) {
+            case COLUMN_MODE_WIDE: return COLUMNS_IN_WIDE_MODE;
+            case COLUMN_MODE_NARROW: return Math.min(COLUMNS_IN_NARROW_MODE, viewColumns);
+            default: return viewColumns;
+        }
     }
 
     /** Changes the size of the screen. */
@@ -2102,7 +2118,7 @@ public final class TerminalEmulator {
         }
         if (mode == 12) return isCursorBlinking() ? 1 : 2;
         if (isPermanentlyResetDecMode(mode)) return 4;
-        if (mode == 3) return mColumnMode132 ? 1 : 2;
+        if (mode == 3) return mColumnMode == COLUMN_MODE_WIDE ? 1 : 2;
         if (mode == 40) return mAllow80To132 ? 1 : 2;
         if (rememberedDecModeBit(mode) != 0) return (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
         int internalBit = mapDecSetBitToInternalBit(mode);
@@ -2123,7 +2139,7 @@ public final class TerminalEmulator {
             case 3: // Set: 132 column mode. Reset: 80 column mode. ANSI name: DECCOLM.
                 // Like in xterm it only works while DECSET 40 allows it.
                 if (!mAllow80To132) break;
-                setColumnMode(setting);
+                setColumnMode(setting ? COLUMN_MODE_WIDE : COLUMN_MODE_NARROW);
                 // Sets the left, right, top and bottom scrolling margins to their default positions, which is important for
                 // the "reset" utility to really reset the terminal:
                 mLeftMargin = mTopMargin = 0;
@@ -2411,8 +2427,8 @@ public final class TerminalEmulator {
             case 'c': // RIS - Reset to Initial State (http://vt100.net/docs/vt510-rm/RIS).
                 reset();
                 mConformanceLevel = 65;
-                // Like xterm, a reset also takes DECCOLM back, but only when DECSET 40 allowed it.
-                if (mAllow80To132) setColumnMode(false);
+                // Like xterm, a reset also leaves the 132 columns, but only when DECSET 40 allowed it.
+                if (mAllow80To132 && mColumnMode == COLUMN_MODE_WIDE) setColumnMode(COLUMN_MODE_NARROW);
                 mAllow80To132 = false;
                 mMainBuffer.clearTranscript();
                 blockClear(0, 0, mColumns, mRows);
