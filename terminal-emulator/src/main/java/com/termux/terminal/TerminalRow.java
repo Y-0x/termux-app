@@ -298,7 +298,7 @@ public final class TerminalRow {
         if (newIsCombining && codePoint == VARIATION_SELECTOR_EMOJI && oldCodePointDisplayWidth == 1
             && columnToSet == mColumns - 1) {
             final int base = Character.codePointAt(text, oldStartOfColumnIndex);
-            if (EmojiData.isTextStyleEmoji(base)) return;
+            if (WcWidth.isTextStyleEmoji(base)) return;
         }
 
         // If MAX_COMBINING_CHARACTERS_PER_COLUMN already exist in column, then ignore adding additional combining characters.
