@@ -82,6 +82,9 @@ public final class TerminalBuffer {
      * @param screenRows the height of just the screen, not including the transcript that holds lines that have scrolled off
      *                   the top of the screen.
      */
+    /** If the rows that are made now cluster graphemes, DECSET 2027. */
+    private boolean mGraphemeClusters;
+
     public TerminalBuffer(TerminalSessionClient client, int columns, int totalRows, int screenRows) {
         mClient = client;
 
@@ -96,6 +99,25 @@ public final class TerminalBuffer {
     }
 
 
+
+    /** Sets DECSET 2027 for the rows that are made from now on and for the rows that can follow it. */
+    public void setGraphemeClusters(boolean graphemeClusters) {
+        mGraphemeClusters = graphemeClusters;
+        for (TerminalRow row : mLines) {
+            if (row != null) row.adoptGraphemeClusters(graphemeClusters);
+        }
+    }
+
+    /** Tells if the row follows grapheme clusters, widths of its cells depend on it. */
+    public boolean rowGraphemeClusters(int row) {
+        return allocateFullLineIfNecessary(externalToInternalRow(row)).graphemeClusters();
+    }
+
+    private TerminalRow newRow(int columns, long style) {
+        final TerminalRow row = new TerminalRow(columns, style);
+        row.adoptGraphemeClusters(mGraphemeClusters);
+        return row;
+    }
 
     public TerminalSessionClient getClient() {
         return mClient;
@@ -300,7 +322,7 @@ public final class TerminalBuffer {
             TerminalRow[] oldLines = mLines;
             mLines = new TerminalRow[newTotalRows];
             for (int i = 0; i < newTotalRows; i++)
-                mLines[i] = new TerminalRow(newColumns, currentStyle);
+                mLines[i] = newRow(newColumns, currentStyle);
 
             final int oldActiveTranscriptRows = mActiveTranscriptRows;
             final int oldScreenFirstRow = mScreenFirstRow;
@@ -371,9 +393,9 @@ public final class TerminalBuffer {
                     final int codePointIndex = i;
                     char c = oldLine.mText[i];
                     int codePoint = (Character.isHighSurrogate(c)) ? Character.toCodePoint(c, oldLine.mText[++i]) : c;
-                    int displayWidth = WcWidth.width(oldLine.mText, codePointIndex, oldLine.getSpaceUsed());
+                    int displayWidth = WcWidth.width(oldLine.mText, codePointIndex, oldLine.getSpaceUsed(), oldLine.graphemeClusters());
                     // A character of an emoji sequence has a width of its own but none in the cell that it joins.
-                    final boolean joinsCell = displayWidth <= 0 && WcWidth.width(codePoint) > 0;
+                    final boolean joinsCell = displayWidth <= 0 && WcWidth.width(codePoint, oldLine.graphemeClusters()) > 0;
                     // Use the last style if this is a zero-width character:
                     if (displayWidth > 0) {
                         styleAtCol = oldLine.getStyle(currentOldCol);
@@ -382,7 +404,7 @@ public final class TerminalBuffer {
 
                     // Line wrap as necessary. A wide character that U+FE0E makes narrow is written wide first, so it
                     // needs the room of a wide character.
-                    final int widthToFit = displayWidth > 0 ? Math.max(displayWidth, WcWidth.width(codePoint)) : 0;
+                    final int widthToFit = displayWidth > 0 ? Math.max(displayWidth, WcWidth.width(codePoint, oldLine.graphemeClusters())) : 0;
                     if (currentOutputExternalColumn + widthToFit > mColumns) {
                         setLineWrap(currentOutputExternalRow);
                         if (currentOutputExternalRow == mScreenRows - 1) {
@@ -477,7 +499,7 @@ public final class TerminalBuffer {
         // Blank the newly revealed line above the bottom margin:
         int blankRow = externalToInternalRow(bottomMargin - 1);
         if (mLines[blankRow] == null) {
-            mLines[blankRow] = new TerminalRow(mColumns, style);
+            mLines[blankRow] = newRow(mColumns, style);
         } else {
             // Remove bitmaps that are completely scrolled out.
             if(mLines[blankRow].mHasTerminalBitmap) {
@@ -531,7 +553,7 @@ public final class TerminalBuffer {
     }
 
     public TerminalRow allocateFullLineIfNecessary(int row) {
-        return (mLines[row] == null) ? (mLines[row] = new TerminalRow(mColumns, 0)) : mLines[row];
+        return (mLines[row] == null) ? (mLines[row] = newRow(mColumns, 0)) : mLines[row];
     }
 
     public void setChar(int column, int row, int codePoint, long style) {
