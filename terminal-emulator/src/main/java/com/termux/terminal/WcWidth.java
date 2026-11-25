@@ -44,6 +44,7 @@ public final class WcWidth {
     private static final int REGIONAL_INDICATOR_LAST = 0x1F1FF;
     private static final int EMOJI_MODIFIER_FIRST = 0x1F3FB;
     private static final int EMOJI_MODIFIER_LAST = 0x1F3FF;
+    private static final int KEYCAP = 0x20E3;
 
     /** Return the terminal display width of a code point on its own: 0, 1 || 2. */
     public static int width(int ucs) {
@@ -118,6 +119,20 @@ public final class WcWidth {
     /** Tells if a code point has an emoji and a text variation sequence, so that U+FE0F and U+FE0E change its look. */
     static boolean hasEmojiVariation(int codePoint) {
         return intable(UnicodeTables.EMOJI_VARIATION_BASES, codePoint);
+    }
+
+    /**
+     * Tells if the code point at an index position is drawn as a color emoji, and not with the font of the terminal.
+     * A regional indicator, a keycap and an emoji that is wide or followed by U+FE0F are. A symbol such as the copyright
+     * sign is an emoji only with U+FE0F.
+     */
+    public static boolean isEmojiPresentation(char[] chars, int index, int limit) {
+        final int codePoint = codePointAt(chars, index, limit);
+        if (codePoint == KEYCAP || (REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST)) return true;
+        if (!isExtendedPictographic(codePoint)) return false;
+        final int next = index + Character.charCount(codePoint);
+        if (next < limit && chars[next] == VARIATION_SELECTOR_EMOJI) return true;
+        return intable(UnicodeTables.WIDE, codePoint);
     }
 
     /** Tells if a code point can have no width in the cell before it, so that only then the cell has to be checked. */
