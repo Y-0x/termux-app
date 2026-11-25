@@ -63,6 +63,85 @@ public final class TerminalRow {
     public boolean mHasTerminalBitmap;
     /** The colors of the underline slots of this row as ARGB, null until a cell gets an underline color. Slot 0 is unused. */
     private int[] mUnderlineSlotColors;
+    /** If the characters of an emoji sequence are one cell, DECSET 2027. Without it each code point has its own width. */
+    private boolean mGraphemeClusters;
+
+    /** Tells if the widths of this row follow grapheme clusters, see {@link TerminalEmulator} DECSET 2027. */
+    public boolean graphemeClusters() {
+        return mGraphemeClusters;
+    }
+
+    /**
+     * Makes the row follow DECSET 2027, so that the rows which were written before the mode changed have its state too.
+     * The widths of the cells come from the text, so a row with characters that depend on the mode is written again
+     * cell by cell. A cell that no longer fits at the end of the row is dropped.
+     */
+    public void adoptGraphemeClusters(boolean graphemeClusters) {
+        if (mGraphemeClusters == graphemeClusters) return;
+        if (!dependsOnGraphemeClusters()) {
+            mGraphemeClusters = graphemeClusters;
+            invalidateBidiLayout();
+            return;
+        }
+        final char[] text = Arrays.copyOf(mText, mSpaceUsed);
+        final long[] styles = Arrays.copyOf(mStyle, mStyle.length);
+        final int[] underlineColors = mUnderlineSlotColors == null ? null : Arrays.copyOf(mUnderlineSlotColors, mUnderlineSlotColors.length);
+        final boolean wasGraphemeClusters = mGraphemeClusters;
+        final boolean lineWrap = mLineWrap;
+        clear(styles[mColumns - 1]);
+        mGraphemeClusters = graphemeClusters;
+        mLineWrap = lineWrap;
+
+        int sourceColumn = 0;
+        int sourceCellWidth = 0;
+        int column = 0;
+        for (int i = 0; i < text.length; i++) {
+            final int index = i;
+            final int codePoint = Character.isHighSurrogate(text[i]) && i + 1 < text.length
+                ? Character.toCodePoint(text[i], text[++i]) : text[i];
+            final int sourceWidth = WcWidth.width(text, index, text.length, wasGraphemeClusters);
+            if (sourceWidth > 0) {
+                sourceColumn += sourceCellWidth;
+                sourceCellWidth = sourceWidth;
+            }
+            if (sourceColumn >= mColumns) break;
+            final long style = styles[sourceColumn];
+            final int underlineColor = underlineColorOf(underlineColors, style);
+
+            final int ownWidth = WcWidth.width(codePoint, graphemeClusters);
+            final boolean joinsCell = graphemeClusters && ownWidth > 0 && column > 0 && WcWidth.mayJoinCell(codePoint)
+                && cellJoins(column - 1, codePoint);
+            final int width = joinsCell ? 0 : ownWidth;
+            if (width > 0) {
+                if (column + width > mColumns) break;
+                setChar(column, codePoint, style, underlineColor);
+                column += width;
+            } else if (column > 0) {
+                final int cellColumn = column - 1;
+                final int before = cellWidth(cellColumn);
+                if (joinsCell) appendToCell(cellColumn, codePoint, style, underlineColor);
+                else setChar(cellColumn, codePoint, style, underlineColor);
+                column += Math.max(0, cellWidth(cellColumn) - before);
+            }
+        }
+    }
+
+    /**
+     * Tells if the width of a cell of the row changes with DECSET 2027. Only a zero width joiner, a variation
+     * selector, a regional indicator and an emoji modifier are such characters.
+     */
+    private boolean dependsOnGraphemeClusters() {
+        if (!mHasNonOneWidthOrSurrogateChars) return false;
+        for (int i = 0; i < mSpaceUsed; i++) {
+            final char c = mText[i];
+            if (c == 0x200D || c == 0xFE0E || c == 0xFE0F) return true;
+            if (c == 0xD83C && i + 1 < mSpaceUsed) {
+                final char low = mText[i + 1];
+                if ((low >= 0xDDE6 && low <= 0xDDFF) || (low >= 0xDFFB && low <= 0xDFFF)) return true;
+            }
+        }
+        return false;
+    }
 
     /** Returns true if {@code codePoint} belongs to an RTL script or BiDi formatting block. */
     public static boolean isRtlOrBidiCodePoint(int codePoint) {
@@ -120,9 +199,9 @@ public final class TerminalRow {
                 startingFromSecondHalfOfWideChar = false;
                 w = 1;
             } else {
-                w = WcWidth.width(sourceChars, codePointIndex, sourceLimit);
+                w = WcWidth.width(sourceChars, codePointIndex, sourceLimit, line.mGraphemeClusters);
                 // A character of an emoji sequence has a width of its own but none in the cell that it joins.
-                joinsCell = w <= 0 && WcWidth.width(codePoint) > 0;
+                joinsCell = w <= 0 && WcWidth.width(codePoint, line.mGraphemeClusters) > 0;
             }
             if (w > 0) {
                 destinationX += latestNonCombiningWidth;
@@ -151,13 +230,13 @@ public final class TerminalRow {
             char c = mText[newCharIndex++]; // cci=1, cci=2
             boolean isHigh = Character.isHighSurrogate(c);
             if (isHigh) newCharIndex++;
-            int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed); // 1, 2
+            int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed, mGraphemeClusters); // 1, 2
             if (wcwidth > 0) {
                 currentColumn += wcwidth;
                 if (currentColumn == column) {
                     while (newCharIndex < mSpaceUsed) {
                         // Skip combining chars.
-                        if (WcWidth.width(mText, newCharIndex, mSpaceUsed) > 0) break;
+                        if (WcWidth.width(mText, newCharIndex, mSpaceUsed, mGraphemeClusters) > 0) break;
                         newCharIndex += Character.isHighSurrogate(mText[newCharIndex]) ? 2 : 1;
                     }
                     return newCharIndex;
@@ -175,7 +254,7 @@ public final class TerminalRow {
         if (!mHasNonOneWidthOrSurrogateChars) return new char[] {mText[column]};
         if (column > 0 && wideDisplayCharacterStartingAt(column - 1)) column--;
         final int start = findStartOfColumn(column);
-        final int width = WcWidth.width(mText, start, mSpaceUsed);
+        final int width = WcWidth.width(mText, start, mSpaceUsed, mGraphemeClusters);
         final int end = column + width < mColumns ? findStartOfColumn(column + width) : mSpaceUsed;
         return Arrays.copyOfRange(mText, start, end);
     }
@@ -183,13 +262,13 @@ public final class TerminalRow {
     /** Tells if {@code codePoint} would join the cell at the column, see {@link WcWidth#joinsCell(char[], int, int)}. */
     public boolean cellJoins(int column, int codePoint) {
         final char[] cell = cellChars(column);
-        return WcWidth.joinsCell(cell, cell.length, codePoint);
+        return mGraphemeClusters && WcWidth.joinsCell(cell, cell.length, codePoint);
     }
 
     /** The width of the cell at the column. */
     public int cellWidth(int column) {
         final char[] cell = cellChars(column);
-        return WcWidth.width(cell, 0, cell.length);
+        return WcWidth.width(cell, 0, cell.length, mGraphemeClusters);
     }
 
     /** The width that the cell at the column would have after {@code codePoint} was added to it. */
@@ -197,12 +276,12 @@ public final class TerminalRow {
         final char[] cell = cellChars(column);
         final char[] grown = Arrays.copyOf(cell, cell.length + Character.charCount(codePoint));
         Character.toChars(codePoint, grown, cell.length);
-        return WcWidth.width(grown, 0, grown.length);
+        return WcWidth.width(grown, 0, grown.length, mGraphemeClusters);
     }
 
     public boolean wideDisplayCharacterStartingAt(int column) {
         for (int currentCharIndex = 0, currentColumn = 0; currentCharIndex < mSpaceUsed; ) {
-            final int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed);
+            final int wcwidth = WcWidth.width(mText, currentCharIndex, mSpaceUsed, mGraphemeClusters);
             currentCharIndex += Character.isHighSurrogate(mText[currentCharIndex]) ? 2 : 1;
             if (wcwidth > 0) {
                 if (currentColumn == column && wcwidth == 2) return true;
@@ -253,7 +332,7 @@ public final class TerminalRow {
         }
 
         // A character that joins a cell counts like a combining character.
-        final int newCodePointDisplayWidth = joinsCell ? 0 : WcWidth.width(codePoint);
+        final int newCodePointDisplayWidth = joinsCell ? 0 : WcWidth.width(codePoint, mGraphemeClusters);
 
         // Fast path when we don't have any chars with width != 1
         if (!mHasNonOneWidthOrSurrogateChars) {
@@ -282,7 +361,7 @@ public final class TerminalRow {
 
         char[] text = mText;
         final int oldStartOfColumnIndex = findStartOfColumn(columnToSet);
-        final int oldCodePointDisplayWidth = WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed);
+        final int oldCodePointDisplayWidth = WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed, mGraphemeClusters);
 
         // Get the number of elements in the mText array this column uses now
         int oldCharactersUsedForColumn;
@@ -295,7 +374,7 @@ public final class TerminalRow {
         }
 
         // U+FE0F makes a narrow emoji wide, which needs the next column. In the last column the cell stays as it is.
-        if (newIsCombining && codePoint == VARIATION_SELECTOR_EMOJI && oldCodePointDisplayWidth == 1
+        if (mGraphemeClusters && newIsCombining && codePoint == VARIATION_SELECTOR_EMOJI && oldCodePointDisplayWidth == 1
             && columnToSet == mColumns - 1) {
             final int base = Character.codePointAt(text, oldStartOfColumnIndex);
             if (WcWidth.hasEmojiVariation(base)) return;
@@ -345,7 +424,7 @@ public final class TerminalRow {
 
         // A combining character can change the width of the cell, which only U+FE0F does.
         final int newCellDisplayWidth = newIsCombining
-            ? WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed) : newCodePointDisplayWidth;
+            ? WcWidth.width(text, oldStartOfColumnIndex, mSpaceUsed, mGraphemeClusters) : newCodePointDisplayWidth;
 
         if (oldCodePointDisplayWidth == 2 && newCellDisplayWidth == 1) {
             // Replace second half of wide char with a space. Which mean that we actually add a ' ' java character.

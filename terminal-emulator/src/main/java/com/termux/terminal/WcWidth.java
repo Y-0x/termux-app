@@ -46,8 +46,19 @@ public final class WcWidth {
     private static final int EMOJI_MODIFIER_LAST = 0x1F3FF;
     private static final int KEYCAP = 0x20E3;
 
+    /**
+     * The width of a code point on its own when the terminal does not cluster graphemes, as wcwidth(3) of a shell or a
+     * line editor has it: a regional indicator is as wide as a letter, so that a flag has the 2 columns of its 2 letters.
+     */
+    public static int width(int ucs, boolean graphemeClusters) {
+        if (!graphemeClusters && REGIONAL_INDICATOR_FIRST <= ucs && ucs <= REGIONAL_INDICATOR_LAST) return 1;
+        return width(ucs);
+    }
+
     /** Return the terminal display width of a code point on its own: 0, 1 || 2. */
     public static int width(int ucs) {
+        // Printable ASCII is most of the text of a terminal.
+        if (ucs >= 0x20 && ucs < 0x7F) return 1;
         if (ucs == 0 ||
             ucs == 0x034F ||
             (0x200B <= ucs && ucs <= 0x200F) ||
@@ -85,7 +96,21 @@ public final class WcWidth {
      * </ul>
      */
     public static int width(char[] chars, int index, int limit) {
+        return width(chars, index, limit, true);
+    }
+
+    /**
+     * The width of the code point at an index position, see {@link #width(char[], int, int)}. Without grapheme clustering
+     * the characters around it do not count, only the code point does, as it is for wcwidth(3).
+     */
+    public static int width(char[] chars, int index, int limit, boolean graphemeClusters) {
         final int codePoint = codePointAt(chars, index, limit);
+        if (!graphemeClusters) return width(codePoint, false);
+        // Only U+FE0F and U+FE0E after a character can change the width of printable ASCII, as in a keycap.
+        if (codePoint >= 0x20 && codePoint < 0x7F) {
+            final int following = index + 1;
+            if (following >= limit || (chars[following] != VARIATION_SELECTOR_EMOJI && chars[following] != VARIATION_SELECTOR_TEXT)) return 1;
+        }
         final int width = width(codePoint);
         if (width == 0) return 0;
 

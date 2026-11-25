@@ -405,10 +405,15 @@ public final class TerminalEmulator {
     private int mAttributeChangeExtent;
 
     /**
-     * DECSET 2027, grapheme clustering. The terminal always clusters the characters of an emoji sequence into one cell,
-     * see {@link WcWidth#width(char[], int, int)}, so DECRQM says that the mode is permanently set.
+     * DECSET 2027, grapheme clustering. When it is set the characters of an emoji sequence are one cell, see
+     * {@link WcWidth#width(char[], int, int)}. When it is reset every code point has its own width, which is what the
+     * wcwidth(3) of a shell or a line editor counts, so that the cursor of the shell stays where it should be.
+     * A program that clusters graphemes itself asks with DECRQM and then sets it.
      */
     private static final int GRAPHEME_CLUSTERING_MODE = 2027;
+
+    /** The state of {@link #GRAPHEME_CLUSTERING_MODE}. */
+    private boolean mGraphemeClusters;
 
     /** The columns of DECCOLM when it is reset and when it is set. */
     private static final int COLUMNS_IN_NARROW_MODE = 80;
@@ -725,6 +730,13 @@ public final class TerminalEmulator {
                 mSession.write(data, 0, data.length);
             }
         }
+    }
+
+    /** Sets DECSET 2027 for both screens, the rows that were written before follow it. */
+    private void setGraphemeClusters(boolean graphemeClusters) {
+        mGraphemeClusters = graphemeClusters;
+        mMainBuffer.setGraphemeClusters(graphemeClusters);
+        mAltBuffer.setGraphemeClusters(graphemeClusters);
     }
 
     /** Switches the terminal to the columns of a column mode and tells the client about the new size. */
@@ -2126,7 +2138,7 @@ public final class TerminalEmulator {
         if (isPermanentlyResetDecMode(mode)) return 4;
         if (mode == 3) return mColumnMode == COLUMN_MODE_WIDE ? 1 : 2;
         if (mode == 40) return mAllow80To132 ? 1 : 2;
-        if (mode == GRAPHEME_CLUSTERING_MODE) return 3;
+        if (mode == GRAPHEME_CLUSTERING_MODE) return mGraphemeClusters ? 1 : 2;
         if (rememberedDecModeBit(mode) != 0) return (mRememberedDecModes & rememberedDecModeBit(mode)) != 0 ? 1 : 2;
         int internalBit = mapDecSetBitToInternalBit(mode);
         if (internalBit == -1) return 0;
@@ -2253,6 +2265,9 @@ public final class TerminalEmulator {
             }
             case 2004:
                 // Bracketed paste mode - setting bit is enough.
+                break;
+            case GRAPHEME_CLUSTERING_MODE:
+                setGraphemeClusters(setting);
                 break;
             default:
                 unknownParameter(externalBit);
@@ -3871,8 +3886,10 @@ public final class TerminalEmulator {
         final boolean autoWrap = isDecsetInternalBitSet(DECSET_BIT_AUTOWRAP);
         // The cell that a combining character or a character of an emoji sequence belongs to.
         final int cellColumn = mCursorCol - (mAboutToAutoWrap ? 0 : 1);
-        final int ownDisplayWidth = WcWidth.width(codePoint);
-        final boolean joinsCell = ownDisplayWidth > 0 && cellColumn >= 0 && WcWidth.mayJoinCell(codePoint)
+        // The row has the state of the mode that it was written with.
+        final boolean graphemeClusters = mScreen.rowGraphemeClusters(mCursorRow);
+        final int ownDisplayWidth = WcWidth.width(codePoint, graphemeClusters);
+        final boolean joinsCell = graphemeClusters && ownDisplayWidth > 0 && cellColumn >= 0 && WcWidth.mayJoinCell(codePoint)
             && mScreen.cellJoins(cellColumn, mCursorRow, codePoint);
         final int displayWidth = joinsCell ? 0 : ownDisplayWidth;
         final boolean cursorInLastColumn = mCursorCol == mRightMargin - 1;
@@ -4179,6 +4196,7 @@ public final class TerminalEmulator {
         mLocalEcho = false;
         mProtectedMode = PROTECTED_MODE_OFF;
         mAttributeChangeExtent = 0;
+        setGraphemeClusters(false);
         mSavedDecModes.clear();
         mEffect = 0;
         mRememberedDecModes = 0;
