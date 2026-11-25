@@ -15,6 +15,8 @@ import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
 import com.termux.terminal.WcWidth;
 
+import java.util.ArrayList;
+
 /**
  * Renders a {@link TerminalEmulator} into a {@link Canvas}.
  *
@@ -384,7 +386,7 @@ public final class TerminalRenderer {
     private void applyPaintStyleForMeasurement(long cellStyle) {
         int effect = TextStyle.decodeEffect(cellStyle);
         mTextPaint.setFakeBoldText((effect & (TextStyle.CHARACTER_ATTRIBUTE_BOLD | TextStyle.CHARACTER_ATTRIBUTE_BLINK)) != 0);
-        mTextPaint.setTextSkewX((effect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? -0.35f : 0.f);
+        mTextPaint.setTextSkewX((effect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? ITALIC_SKEW_X : 0.f);
         mTextPaint.setUnderlineText(false);
         mTextPaint.setStrikeThruText(false);
     }
@@ -718,6 +720,73 @@ public final class TerminalRenderer {
         canvas.drawRect(left, top, right, top + Math.max(1f, textSize / 18f), mUnderlinePaint);
     }
 
+    /** The skew of the fake italic, the same value is used to measure and to draw. */
+    private static final float ITALIC_SKEW_X = -0.35f;
+
+    /**
+     * Tells if a text has a color emoji. It is a bitmap, so a skew would slant it and push it out of its cell.
+     */
+    private static boolean hasEmojiPresentation(char[] text, int start, int length) {
+        final int end = start + length;
+        for (int i = start; i < end; ) {
+            if (WcWidth.isEmojiPresentation(text, i, end)) return true;
+            i += Character.isHighSurrogate(text[i]) && i + 1 < end ? 2 : 1;
+        }
+        return false;
+    }
+
+    /** Sets the italic skew of the paint for a text, an emoji is never slanted. */
+    private void applyItalicSkew(long style, char[] text, int start, int length) {
+        final boolean italic = (TextStyle.decodeEffect(style) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0;
+        mTextPaint.setTextSkewX(italic && !hasEmojiPresentation(text, start, length) ? ITALIC_SKEW_X : 0.f);
+    }
+
+    /** A run of cells with one style, it is kept until its row is complete so that all backgrounds are drawn first. */
+    private static final class QueuedRun {
+        int startColumn;
+        int columns;
+        int startChar;
+        int chars;
+        float measuredWidth;
+        int cursorColor;
+        long style;
+        boolean reverseVideo;
+    }
+
+    private final ArrayList<QueuedRun> mQueuedRuns = new ArrayList<>();
+    private int mQueuedRunCount;
+
+    private void queueRun(int startColumn, int columns, int startChar, int chars, float measuredWidth,
+                          int cursorColor, long style, boolean reverseVideo) {
+        if (mQueuedRunCount == mQueuedRuns.size()) mQueuedRuns.add(new QueuedRun());
+        final QueuedRun run = mQueuedRuns.get(mQueuedRunCount++);
+        run.startColumn = startColumn;
+        run.columns = columns;
+        run.startChar = startChar;
+        run.chars = chars;
+        run.measuredWidth = measuredWidth;
+        run.cursorColor = cursorColor;
+        run.style = style;
+        run.reverseVideo = reverseVideo;
+    }
+
+    /**
+     * Draws the queued runs of a row. The backgrounds and the cursor come first and the text after them, so that a
+     * glyph that is wider than its cell, as an italic one is, is never covered by the background of the next run.
+     */
+    private void flushQueuedRuns(Canvas canvas, char[] line, int[] palette, float y, int cursorShape) {
+        for (int pass = 0; pass < 2; pass++) {
+            final boolean backgroundPass = pass == 0;
+            for (int i = 0; i < mQueuedRunCount; i++) {
+                final QueuedRun run = mQueuedRuns.get(i);
+                drawTextRun(canvas, line, palette, y, run.startColumn, run.columns, run.startChar, run.chars,
+                        run.measuredWidth, run.cursorColor, cursorShape, run.style, run.reverseVideo, false,
+                        backgroundPass, !backgroundPass);
+            }
+        }
+        mQueuedRunCount = 0;
+    }
+
     /** Renders the terminal into {@code canvas}, starting at {@code topRow} with an optional selection range. */
     public final void render(TerminalEmulator mEmulator, Canvas canvas, int topRow,
                              int selectionY1, int selectionY2, int selectionX1, int selectionX2) {
@@ -814,6 +883,7 @@ public final class TerminalRenderer {
         int lastRunStartColumn = -1;
         int lastRunStartCharIndex = 0;
         boolean lastRunFontWidthMismatch = false;
+        boolean lastRunEmoji = false;
         int currentCharIndex = 0;
         float measuredWidthForRun = 0.f;
 
@@ -823,10 +893,9 @@ public final class TerminalRenderer {
                 if (lastRunStartColumn >= 0 && column > lastRunStartColumn) {
                     int cursorColor = lastRunInsideCursor ? palette[TextStyle.COLOR_INDEX_CURSOR] : 0;
                     boolean invertCursor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
-                    drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, column - lastRunStartColumn,
+                    queueRun(lastRunStartColumn, column - lastRunStartColumn,
                             lastRunStartCharIndex, currentCharIndex - lastRunStartCharIndex, measuredWidthForRun,
-                            cursorColor, cursorShape, lastRunStyle,
-                            reverseVideo || invertCursor || lastRunInsideSelection, false);
+                            cursorColor, lastRunStyle, reverseVideo || invertCursor || lastRunInsideSelection);
                     lastRunStartColumn = -1;
                     measuredWidthForRun = 0.f;
                 }
@@ -868,22 +937,25 @@ public final class TerminalRenderer {
                     ? asciiMeasures[codePoint]
                     : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint + combiningChars);
             final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
+            // An emoji is a run of its own in italic text, so that only the text around it is slanted.
+            final boolean emoji = (TextStyle.decodeEffect(style) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0
+                    && WcWidth.isEmojiPresentation(line, currentCharIndex, charsUsedInLine);
 
             if (lastRunStartColumn < 0
                     || style != lastRunStyle
                     || insideCursor != lastRunInsideCursor
                     || insideSelection != lastRunInsideSelection
                     || fontWidthMismatch
-                    || lastRunFontWidthMismatch) {
+                    || lastRunFontWidthMismatch
+                    || emoji != lastRunEmoji) {
                 if (lastRunStartColumn >= 0) {
                     final int columnWidthSinceLastRun = column - lastRunStartColumn;
                     final int charsSinceLastRun = currentCharIndex - lastRunStartCharIndex;
                     int cursorColor = lastRunInsideCursor ? palette[TextStyle.COLOR_INDEX_CURSOR] : 0;
                     boolean invertCursor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
-                    drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
+                    queueRun(lastRunStartColumn, columnWidthSinceLastRun,
                             lastRunStartCharIndex, charsSinceLastRun, measuredWidthForRun,
-                            cursorColor, cursorShape, lastRunStyle,
-                            reverseVideo || invertCursor || lastRunInsideSelection, false);
+                            cursorColor, lastRunStyle, reverseVideo || invertCursor || lastRunInsideSelection);
                 }
                 measuredWidthForRun = 0.0f;
                 lastRunStyle = style;
@@ -892,6 +964,7 @@ public final class TerminalRenderer {
                 lastRunStartColumn = column;
                 lastRunStartCharIndex = currentCharIndex;
                 lastRunFontWidthMismatch = fontWidthMismatch;
+                lastRunEmoji = emoji;
             }
             measuredWidthForRun += measuredCodePointWidth;
             currentCharIndex += charsForCodePoint + combiningChars;
@@ -903,11 +976,11 @@ public final class TerminalRenderer {
             final int charsSinceLastRun = currentCharIndex - lastRunStartCharIndex;
             int cursorColor = lastRunInsideCursor ? palette[TextStyle.COLOR_INDEX_CURSOR] : 0;
             boolean invertCursor = lastRunInsideCursor && cursorShape == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK;
-            drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun,
+            queueRun(lastRunStartColumn, columnWidthSinceLastRun,
                     lastRunStartCharIndex, charsSinceLastRun, measuredWidthForRun,
-                    cursorColor, cursorShape, lastRunStyle,
-                    reverseVideo || invertCursor || lastRunInsideSelection, false);
+                    cursorColor, lastRunStyle, reverseVideo || invertCursor || lastRunInsideSelection);
         }
+        flushQueuedRuns(canvas, line, palette, heightOffset, cursorShape);
     }
 
     /** Renders a BiDi-reordered row using continuous Web/Facebook flow in main buffer or strict grid in TUIs. */
@@ -1221,6 +1294,8 @@ public final class TerminalRenderer {
         }
         if (used == 0) return;
 
+        applyItalicSkew(repCell.style, mRunCharBuffer, 0, used);
+
         float slotLeft = geo.visLeft[startCol];
         float slotRight = geo.visRight[endCol - 1];
         float slotW = slotRight - slotLeft;
@@ -1532,7 +1607,7 @@ public final class TerminalRenderer {
         drawTextRun(canvas, mRunCharBuffer, palette, heightOffset,
                 startCol, runColumns, 0, used, measuredWidth,
                 cursorColor, cursorShape, style,
-                reverseVideo || invertCursor || insideSelection, false);
+                reverseVideo || invertCursor || insideSelection, false, true, true);
     }
 
     private boolean lastRunNeedsMeasure(BidiLayout.LogicalCell[] cells, int count) {
@@ -1637,7 +1712,7 @@ public final class TerminalRenderer {
 
             int firstEffect = TextStyle.decodeEffect(firstStyle);
             mTextPaint.setFakeBoldText((firstEffect & (TextStyle.CHARACTER_ATTRIBUTE_BOLD | TextStyle.CHARACTER_ATTRIBUTE_BLINK)) != 0);
-            mTextPaint.setTextSkewX((firstEffect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? -0.35f : 0.f);
+            mTextPaint.setTextSkewX((firstEffect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? ITALIC_SKEW_X : 0.f);
             final float measuredWidth = mTextPaint.measureText(mRunCharBuffer, 0, used);
 
             final float scaleX = computeRtlRunScaleX(measuredWidth, runColumns, mFontWidth);
@@ -1746,7 +1821,7 @@ public final class TerminalRenderer {
                 int bufLen = used - bufStart;
                 int segEffect = TextStyle.decodeEffect(visualCells[startCol + sStart].style);
                 mTextPaint.setFakeBoldText((segEffect & (TextStyle.CHARACTER_ATTRIBUTE_BOLD | TextStyle.CHARACTER_ATTRIBUTE_BLINK)) != 0);
-                mTextPaint.setTextSkewX((segEffect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? -0.35f : 0.f);
+                mTextPaint.setTextSkewX((segEffect & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0 ? ITALIC_SKEW_X : 0.f);
                 float segNatW = (bufLen > 0) ? mTextPaint.measureText(mRunCharBuffer, bufStart, bufLen) : 0f;
 
                 mSegKind[segCount] = SEG_RTL;
@@ -2051,7 +2126,7 @@ public final class TerminalRenderer {
         mCellUnderlineColor = underlineColorOf(style, effect);
         mTextPaint.setFakeBoldText(bold);
         mTextPaint.setUnderlineText(underline && mCellUnderlineColor == 0);
-        mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
+        mTextPaint.setTextSkewX(italic ? ITALIC_SKEW_X : 0.f);
         mTextPaint.setStrikeThruText(strikeThrough);
         mTextPaint.setColor(textColor);
         return true;
@@ -2062,6 +2137,8 @@ public final class TerminalRenderer {
                                 boolean needScale, float baseline, int cursorShape, boolean reverseVideo,
                                 boolean clip, float clipL, float clipT, float clipR, float clipB) {
         if (!configurePaintForCell(repCell, palette, cursorShape, reverseVideo)) return;
+
+        applyItalicSkew(repCell.style, text, offset, used);
 
         boolean needSave = clip || needScale;
         if (needSave) canvas.save();
@@ -2101,7 +2178,8 @@ public final class TerminalRenderer {
                              int startColumn, int runWidthColumns,
                              int startCharIndex, int runWidthChars,
                              float mes, int cursor, int cursorStyle,
-                             long textStyle, boolean reverseVideo, boolean isRtl) {
+                             long textStyle, boolean reverseVideo, boolean isRtl,
+                             boolean drawBackground, boolean drawText) {
         int foreColor = TextStyle.decodeForeColor(textStyle);
         final int effect = TextStyle.decodeEffect(textStyle);
         int backColor = TextStyle.decodeBackColor(textStyle);
@@ -2135,12 +2213,12 @@ public final class TerminalRenderer {
             savedMatrix = true;
         }
 
-        if (backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
+        if (drawBackground && backColor != palette[TextStyle.COLOR_INDEX_BACKGROUND]) {
             mTextPaint.setColor(backColor);
             canvas.drawRect(left, y - mFontLineSpacingAndAscent + mFontAscent, right, y, mTextPaint);
         }
 
-        if (cursor != 0) {
+        if (drawBackground && cursor != 0) {
             mTextPaint.setColor(cursor);
             float cursorHeight = mFontLineSpacingAndAscent - mFontAscent;
             if (cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_UNDERLINE) cursorHeight /= 4.f;
@@ -2148,7 +2226,7 @@ public final class TerminalRenderer {
             canvas.drawRect(left, y - cursorHeight, right, y, mTextPaint);
         }
 
-        if ((effect & TextStyle.CHARACTER_ATTRIBUTE_INVISIBLE) == 0) {
+        if (drawText && (effect & TextStyle.CHARACTER_ATTRIBUTE_INVISIBLE) == 0) {
             if (dim) {
                 int red   = (0xFF & (foreColor >> 16)) * 2 / 3;
                 int green = (0xFF & (foreColor >>  8)) * 2 / 3;
@@ -2158,7 +2236,7 @@ public final class TerminalRenderer {
 
             mTextPaint.setFakeBoldText(bold);
             mTextPaint.setUnderlineText(underline && underlineColor == 0);
-            mTextPaint.setTextSkewX(italic ? -0.35f : 0.f);
+            mTextPaint.setTextSkewX(italic && !hasEmojiPresentation(text, startCharIndex, runWidthChars) ? ITALIC_SKEW_X : 0.f);
             mTextPaint.setStrikeThruText(strikeThrough);
             mTextPaint.setColor(foreColor);
 
