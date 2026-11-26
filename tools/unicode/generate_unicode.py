@@ -16,11 +16,11 @@ Usage, from the project root:
 
 The files that are read:
 
-    EastAsianWidth.txt                       wide and fullwidth characters
+    extracted/DerivedEastAsianWidth.txt      wide and fullwidth characters, with the unassigned ones that default to wide
     extracted/DerivedGeneralCategory.txt     the general category
     auxiliary/GraphemeBreakProperty.txt      the grapheme cluster break property
-    DerivedCoreProperties.txt                the indic conjunct break property
-    emoji/emoji-data.txt                     Emoji, Emoji_Presentation, Emoji_Modifier, Extended_Pictographic
+    DerivedCoreProperties.txt                the indic conjunct break property and the default ignorable characters
+    emoji/emoji-data.txt                     Emoji, Emoji_Presentation, Emoji_Modifier, Emoji_Modifier_Base, Extended_Pictographic
     emoji/emoji-variation-sequences.txt      characters that U+FE0E and U+FE0F can change
 """
 
@@ -43,7 +43,7 @@ LATEST = "UCD/latest"
 
 # Path of every source file below the base url.
 FILES = {
-    "east_asian_width": "EastAsianWidth.txt",
+    "east_asian_width": "extracted/DerivedEastAsianWidth.txt",
     "general_category": "extracted/DerivedGeneralCategory.txt",
     "grapheme_break": "auxiliary/GraphemeBreakProperty.txt",
     "derived_core": "DerivedCoreProperties.txt",
@@ -78,6 +78,7 @@ GRAPHEME_BREAKS = ("Other", "Prepend", "CR", "LF", "Control", "Extend", "Regiona
                    "L", "V", "T", "LV", "LVT", "ZWJ")
 INDIC_CONJUNCT_BREAKS = ("None", "Linker", "Consonant", "Extend")
 SOFT_HYPHEN = 0x00AD
+HANGUL_CHOSEONG_FILLER = 0x115F
 
 # The layout of the packed property value, a field is a number of bits and a flag is one bit.
 FIELDS = (
@@ -86,7 +87,7 @@ FIELDS = (
     ("GRAPHEME_BREAK", 4),
     ("INDIC_CONJUNCT_BREAK", 2),
 )
-FLAGS = ("EXTENDED_PICTOGRAPHIC", "EMOJI", "EMOJI_PRESENTATION", "EMOJI_MODIFIER", "VARIATION_BASE")
+FLAGS = ("EXTENDED_PICTOGRAPHIC", "EMOJI", "EMOJI_PRESENTATION", "EMOJI_MODIFIER", "EMOJI_MODIFIER_BASE", "VARIATION_BASE")
 
 
 def field_layout():
@@ -210,12 +211,13 @@ def assign(ranges_by_value, default):
     return table
 
 
-def width_of(code_point, category, east_asian_width, grapheme_break):
+def width_of(code_point, category, east_asian_width, grapheme_break, default_ignorable):
     """The number of columns of a character on its own, 0, 1 or 2."""
-    # Marks, format characters and separators do not move the cursor, as in glibc. Only the soft hyphen is a format
-    # character with a width, wcwidth gives it 1. The control characters have no width in the terminal.
-    # A prepended format character, such as the Arabic number sign, is drawn in front of the characters that follow it.
-    if category in ("Mn", "Me", "Cf", "Zl", "Zp", "Cc") and code_point != SOFT_HYPHEN and grapheme_break != "Prepend":
+    # Marks, format characters, separators, controls and the default ignorable characters do not move the cursor, as in
+    # glibc and in wcwidth. The soft hyphen has a width, and so has the Hangul choseong filler, which wcwidth takes as
+    # wide. A prepended format character, such as the Arabic number sign, is drawn in front of the characters that follow.
+    if code_point not in (SOFT_HYPHEN, HANGUL_CHOSEONG_FILLER) and grapheme_break != "Prepend" \
+            and (category in ("Mn", "Me", "Cf", "Zl", "Zp", "Cc") or default_ignorable):
         return 0
     # The two regional indicators of a flag are one cell of 2 columns, the first one takes it.
     if grapheme_break == "Regional_Indicator":
@@ -248,20 +250,25 @@ def build_properties(texts):
                     GRAPHEME_BREAKS[0])
     conjuncts = assign(parse_ranges(texts["derived_core"], INCB_PATTERN, INDIC_CONJUNCT_BREAKS[1:],
                                     FILES["derived_core"]), INDIC_CONJUNCT_BREAKS[0])
+    ignorable = assign(parse_ranges(texts["derived_core"], LINE_PATTERN, ("Default_Ignorable_Code_Point",),
+                                    FILES["derived_core"]), None)
     emoji = parse_ranges(texts["emoji"], LINE_PATTERN,
-                         ("Extended_Pictographic", "Emoji", "Emoji_Presentation", "Emoji_Modifier"), FILES["emoji"])
+                         ("Extended_Pictographic", "Emoji", "Emoji_Presentation", "Emoji_Modifier",
+                          "Emoji_Modifier_Base"), FILES["emoji"])
     variation_bases = parse_variation_bases(texts["emoji_variation"])
 
     flags = [set() for _ in range(CODE_POINT_COUNT)]
     for name, flag in (("Extended_Pictographic", "EXTENDED_PICTOGRAPHIC"), ("Emoji", "EMOJI"),
-                       ("Emoji_Presentation", "EMOJI_PRESENTATION"), ("Emoji_Modifier", "EMOJI_MODIFIER")):
+                       ("Emoji_Presentation", "EMOJI_PRESENTATION"), ("Emoji_Modifier", "EMOJI_MODIFIER"),
+                       ("Emoji_Modifier_Base", "EMOJI_MODIFIER_BASE")):
         for first, last in emoji[name]:
             for code_point in range(first, last + 1):
                 flags[code_point].add(flag)
     for code_point in variation_bases:
         flags[code_point].add("VARIATION_BASE")
 
-    return [pack(width_of(code_point, categories[code_point], wide[code_point], breaks[code_point]),
+    return [pack(width_of(code_point, categories[code_point], wide[code_point], breaks[code_point],
+                          ignorable[code_point] is not None),
                  categories[code_point], breaks[code_point], conjuncts[code_point], flags[code_point])
             for code_point in range(CODE_POINT_COUNT)]
 
@@ -351,7 +358,8 @@ def check_tables(tables, properties):
         (width(0x1F600), 2), (flag(0x1F600, "EXTENDED_PICTOGRAPHIC"), True), (flag(0x1F600, "EMOJI"), True),
         (flag(0x1F600, "EMOJI_PRESENTATION"), True), (flag(0x263A, "EMOJI_PRESENTATION"), False),
         (flag(0x263A, "VARIATION_BASE"), True), (flag(0x1F600, "VARIATION_BASE"), False),
-        (flag(0x1F3FB, "EMOJI_MODIFIER"), True), (flag(0x0041, "EXTENDED_PICTOGRAPHIC"), False),
+        (flag(0x1F3FB, "EMOJI_MODIFIER"), True), (flag(0x1F44D, "EMOJI_MODIFIER_BASE"), True),
+        (flag(0x1F600, "EMOJI_MODIFIER_BASE"), False), (width(0x1160), 0), (width(0x115F), 2), (width(0xE0001), 0), (flag(0x0041, "EXTENDED_PICTOGRAPHIC"), False),
     ]
     for number, (got, expected) in enumerate(facts, 1):
         if got != expected:
@@ -497,6 +505,11 @@ final class UnicodeTables {
 
     static boolean isEmojiModifier(int properties) {
         return (properties >> EMOJI_MODIFIER_SHIFT & 1) != 0;
+    }
+
+    /** The emoji that a skin tone modifier can follow, Emoji_Modifier_Base. */
+    static boolean isEmojiModifierBase(int properties) {
+        return (properties >> EMOJI_MODIFIER_BASE_SHIFT & 1) != 0;
     }
 
     /** Characters with an emoji and a text style variation sequence, U+FE0F and U+FE0E change their look. */
