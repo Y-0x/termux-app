@@ -35,6 +35,9 @@ final class GraphemeBreak {
             && (right == UnicodeTables.GRAPHEME_BREAK_V || right == UnicodeTables.GRAPHEME_BREAK_T)) return false;
         if ((left == UnicodeTables.GRAPHEME_BREAK_LVT || left == UnicodeTables.GRAPHEME_BREAK_T)
             && right == UnicodeTables.GRAPHEME_BREAK_T) return false;
+        // A skin tone is part of the cell before it only when that is an emoji that can have one, as in UTS #51. Anywhere
+        // else it is an emoji of its own.
+        if (UnicodeTables.isEmojiModifier(properties) && !UnicodeTables.isEmojiModifierBase(beforeProperties)) return true;
         // GB9 and GB9a.
         if (right == UnicodeTables.GRAPHEME_BREAK_EXTEND || right == UnicodeTables.GRAPHEME_BREAK_ZWJ
             || right == UnicodeTables.GRAPHEME_BREAK_SPACINGMARK) return false;
