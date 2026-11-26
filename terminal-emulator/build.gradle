@@ -1,9 +1,10 @@
 apply plugin: 'com.android.library'
 apply plugin: 'maven-publish'
 
-// UnicodeTables.java is not stored in git. Generate it when missing, or on demand with -PupdateUnicode.
+// UnicodeTables.java is not stored in git. Generate it when missing or older than the generator, or on demand with -PupdateUnicode.
 def unicodeTables = file('src/main/java/com/termux/terminal/UnicodeTables.java')
-if (!unicodeTables.exists() || project.hasProperty('updateUnicode')) {
+def unicodeGenerator = new File(rootProject.projectDir, 'tools/unicode/generate_unicode.py')
+if (!unicodeTables.exists() || unicodeTables.lastModified() < unicodeGenerator.lastModified() || project.hasProperty('updateUnicode')) {
     def generator = new ProcessBuilder('python3', 'tools/unicode/generate_unicode.py')
             .directory(rootProject.projectDir)
             .redirectErrorStream(true)

@@ -14,36 +14,10 @@ package com.termux.terminal;
  */
 public final class WcWidth {
 
-    // The tables come from the official Unicode data, see tools/unicode/generate_unicode.py and UnicodeTables.
-
-
-    static boolean intable(int[][] table, int c) {
-        // First quick check f|| Latin1 etc. characters.
-        if (c < table[0][0]) return false;
-
-        // Binary search in table.
-        int bot = 0;
-        int top = table.length - 1; // (int)(size / sizeof(struct interval) - 1);
-        while (top >= bot) {
-            int mid = (bot + top) / 2;
-            if (table[mid][1] < c) {
-                bot = mid + 1;
-            } else if (table[mid][0] > c) {
-                top = mid - 1;
-            } else {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static final int ZERO_WIDTH_JOINER = 0x200D;
     private static final int VARIATION_SELECTOR_TEXT = 0xFE0E;
     private static final int VARIATION_SELECTOR_EMOJI = 0xFE0F;
     private static final int REGIONAL_INDICATOR_FIRST = 0x1F1E6;
     private static final int REGIONAL_INDICATOR_LAST = 0x1F1FF;
-    private static final int EMOJI_MODIFIER_FIRST = 0x1F3FB;
-    private static final int EMOJI_MODIFIER_LAST = 0x1F3FF;
     private static final int KEYCAP = 0x20E3;
 
     /**
@@ -59,26 +33,7 @@ public final class WcWidth {
     public static int width(int ucs) {
         // Printable ASCII is most of the text of a terminal.
         if (ucs >= 0x20 && ucs < 0x7F) return 1;
-        if (ucs == 0 ||
-            ucs == 0x034F ||
-            (0x200B <= ucs && ucs <= 0x200F) ||
-            ucs == 0x2028 ||
-            ucs == 0x2029 ||
-            (0x202A <= ucs && ucs <= 0x202E) ||
-            (0x2060 <= ucs && ucs <= 0x2063)) {
-            return 0;
-        }
-
-        // C0/C1 control characters
-        // Termux change: Return 0 instead of -1.
-        if (ucs < 32 || (0x07F <= ucs && ucs < 0x0A0)) return 0;
-
-        // combining characters with zero width
-        if (intable(UnicodeTables.ZERO_WIDTH, ucs)) return 0;
-
-        if (REGIONAL_INDICATOR_FIRST <= ucs && ucs <= REGIONAL_INDICATOR_LAST) return 2;
-
-        return intable(UnicodeTables.WIDE, ucs) ? 2 : 1;
+        return UnicodeTables.width(UnicodeTables.properties(ucs));
     }
 
     /** The width at an index position in a java char array, see {@link #width(char[], int, int)}. */
@@ -111,26 +66,14 @@ public final class WcWidth {
             final int following = index + 1;
             if (following >= limit || (chars[following] != VARIATION_SELECTOR_EMOJI && chars[following] != VARIATION_SELECTOR_TEXT)) return 1;
         }
-        final int width = width(codePoint);
+        final int properties = UnicodeTables.properties(codePoint);
+        final int width = UnicodeTables.width(properties);
         if (width == 0) return 0;
-
-        if (REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST) {
-            int before = 0;
-            for (int i = index; i > 0; ) {
-                final int previous = Character.codePointBefore(chars, i);
-                if (previous < REGIONAL_INDICATOR_FIRST || previous > REGIONAL_INDICATOR_LAST) break;
-                before++;
-                i -= Character.charCount(previous);
-            }
-            return before % 2 == 1 ? 0 : width;
-        }
-        if (EMOJI_MODIFIER_FIRST <= codePoint && codePoint <= EMOJI_MODIFIER_LAST) {
-            return index > 0 && isExtendedPictographic(Character.codePointBefore(chars, index)) ? 0 : width;
-        }
-        if (index > 0 && chars[index - 1] == ZERO_WIDTH_JOINER && isExtendedPictographic(codePoint)) return 0;
+        // A character that is not at a grapheme cluster boundary belongs to the cell before it.
+        if (index > 0 && !GraphemeBreak.isBoundary(chars, 0, index, codePoint)) return 0;
 
         final int next = index + Character.charCount(codePoint);
-        if (next < limit && hasEmojiVariation(codePoint)) {
+        if (next < limit && UnicodeTables.hasVariationSequence(properties)) {
             if (width == 1 && chars[next] == VARIATION_SELECTOR_EMOJI) return 2;
             if (width == 2 && chars[next] == VARIATION_SELECTOR_TEXT) return 1;
         }
@@ -138,12 +81,12 @@ public final class WcWidth {
     }
 
     static boolean isExtendedPictographic(int codePoint) {
-        return intable(UnicodeTables.EXTENDED_PICTOGRAPHIC, codePoint);
+        return UnicodeTables.isExtendedPictographic(UnicodeTables.properties(codePoint));
     }
 
     /** Tells if a code point has an emoji and a text variation sequence, so that U+FE0F and U+FE0E change its look. */
     static boolean hasEmojiVariation(int codePoint) {
-        return intable(UnicodeTables.EMOJI_VARIATION_BASES, codePoint);
+        return UnicodeTables.hasVariationSequence(UnicodeTables.properties(codePoint));
     }
 
     /** Tells if a code point is one of the 26 regional indicators, the two of a pair are a flag. */
@@ -162,14 +105,12 @@ public final class WcWidth {
         if (!isExtendedPictographic(codePoint)) return false;
         final int next = index + Character.charCount(codePoint);
         if (next < limit && chars[next] == VARIATION_SELECTOR_EMOJI) return true;
-        return intable(UnicodeTables.WIDE, codePoint);
+        return width(codePoint) == 2;
     }
 
-    /** Tells if a code point can have no width in the cell before it, so that only then the cell has to be checked. */
+    /** Tells if a code point may belong to the cell before it. Printable ASCII always starts a cell. */
     public static boolean mayJoinCell(int codePoint) {
-        return (REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST)
-            || (EMOJI_MODIFIER_FIRST <= codePoint && codePoint <= EMOJI_MODIFIER_LAST)
-            || isExtendedPictographic(codePoint);
+        return codePoint >= 0x80;
     }
 
     /** Tells if {@code codePoint} can change the width of the cell that it is added to. */
@@ -182,10 +123,7 @@ public final class WcWidth {
      * This is the same decision that {@link #width(char[], int, int)} makes for a code point in a row.
      */
     public static boolean joinsCell(char[] cell, int cellLength, int codePoint) {
-        final char[] chars = new char[cellLength + 2];
-        System.arraycopy(cell, 0, chars, 0, cellLength);
-        final int length = cellLength + Character.toChars(codePoint, chars, cellLength);
-        return width(chars, cellLength, length) <= 0;
+        return cellLength > 0 && !GraphemeBreak.isBoundary(cell, 0, cellLength, codePoint);
     }
 
     private static int codePointAt(char[] chars, int index, int limit) {
