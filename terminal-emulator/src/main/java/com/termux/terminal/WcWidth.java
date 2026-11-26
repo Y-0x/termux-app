@@ -146,6 +146,11 @@ public final class WcWidth {
         return intable(UnicodeTables.EMOJI_VARIATION_BASES, codePoint);
     }
 
+    /** Tells if a code point is one of the 26 regional indicators, the two of a pair are a flag. */
+    public static boolean isRegionalIndicator(int codePoint) {
+        return REGIONAL_INDICATOR_FIRST <= codePoint && codePoint <= REGIONAL_INDICATOR_LAST;
+    }
+
     /**
      * Tells if the code point at an index position is drawn as a color emoji, and not with the font of the terminal.
      * A regional indicator, a keycap and an emoji that is wide or followed by U+FE0F are. A symbol such as the copyright

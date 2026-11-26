@@ -286,14 +286,15 @@ public final class BidiLayout {
 
         char[] rowChars = rowObject.mText;
         int rowCharsLen = rowObject.getSpaceUsed();
+        // The widths follow the text around a code point, as they do in the row itself.
+        final boolean clusters = rowObject.graphemeClusters();
         int charIdx = 0;
         int col = 0;
 
         while (col < columns && charIdx < rowCharsLen) {
             int cp = Character.codePointAt(rowChars, charIdx);
+            int w = WcWidth.width(rowChars, charIdx, rowCharsLen, clusters);
             charIdx += Character.charCount(cp);
-
-            int w = WcWidth.width(cp);
             if (w <= 0) {
                 // Guard against orphan combining char at start of cell without stalling column cursor.
                 w = 1;
@@ -306,7 +307,7 @@ public final class BidiLayout {
             // Consume all zero-width modifiers/diacritics attached to this cell (up to MAX_COMBINING).
             while (charIdx < rowCharsLen) {
                 int nextCp = Character.codePointAt(rowChars, charIdx);
-                if (WcWidth.width(nextCp) == 0) {
+                if (WcWidth.width(rowChars, charIdx, rowCharsLen, clusters) <= 0) {
                     cell.addCombiningChar(nextCp);
                     charIdx += Character.charCount(nextCp);
                 } else {

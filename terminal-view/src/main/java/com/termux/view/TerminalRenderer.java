@@ -922,11 +922,18 @@ public final class TerminalRenderer {
             final int charsForCodePoint = highSurrogate ? 2 : 1;
             final int codePoint = highSurrogate && currentCharIndex + 1 < charsUsedInLine
                     ? Character.toCodePoint(charAtIndex, line[currentCharIndex + 1]) : charAtIndex;
-            final int codePointWcWidth = WcWidth.width(line, currentCharIndex, charsUsedInLine, clusters);
+            // Without grapheme clustering a flag is two cells, one for each regional indicator, but it is drawn as one
+            // glyph, because a font makes the flag only when both indicators are in the same text.
+            final int firstEnd = currentCharIndex + charsForCodePoint;
+            final boolean flagPair = !clusters && WcWidth.isRegionalIndicator(codePoint)
+                    && firstEnd + 1 < charsUsedInLine && Character.isHighSurrogate(line[firstEnd])
+                    && WcWidth.isRegionalIndicator(Character.toCodePoint(line[firstEnd], line[firstEnd + 1]));
+            final int flagPairChars = flagPair ? 2 : 0;
+            final int codePointWcWidth = WcWidth.width(line, currentCharIndex, charsUsedInLine, clusters) + (flagPair ? 1 : 0);
             final boolean insideCursor = (column == cursorX || (codePointWcWidth == 2 && column == cursorX - 1));
             final boolean insideSelection = column >= selx1 && column <= selx2;
 
-            int nextCharIndex = currentCharIndex + charsForCodePoint;
+            int nextCharIndex = currentCharIndex + charsForCodePoint + flagPairChars;
             int combiningChars = 0;
             while (nextCharIndex < charsUsedInLine && WcWidth.width(line, nextCharIndex, charsUsedInLine, clusters) <= 0) {
                 int combLen = Character.isHighSurrogate(line[nextCharIndex]) ? 2 : 1;
@@ -936,7 +943,7 @@ public final class TerminalRenderer {
 
             final float measuredCodePointWidth = (codePoint < asciiMeasures.length && combiningChars == 0)
                     ? asciiMeasures[codePoint]
-                    : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint + combiningChars);
+                    : mTextPaint.measureText(line, currentCharIndex, charsForCodePoint + flagPairChars + combiningChars);
             final boolean fontWidthMismatch = Math.abs(measuredCodePointWidth / mFontWidth - codePointWcWidth) > 0.01;
             // An emoji is a run of its own in italic text, so that only the text around it is slanted.
             final boolean emoji = (TextStyle.decodeEffect(style) & TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0
@@ -968,7 +975,7 @@ public final class TerminalRenderer {
                 lastRunEmoji = emoji;
             }
             measuredWidthForRun += measuredCodePointWidth;
-            currentCharIndex += charsForCodePoint + combiningChars;
+            currentCharIndex += charsForCodePoint + flagPairChars + combiningChars;
             column += codePointWcWidth;
         }
 
